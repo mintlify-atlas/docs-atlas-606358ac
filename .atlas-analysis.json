@@ -1,0 +1,106 @@
+{
+  "projectType": "general",
+  "projectName": "Anthropic Performance Take-Home",
+  "projectDescription": "A performance optimization challenge featuring a custom VLIW SIMD architecture simulator for kernel optimization.",
+  "theme": "aspen",
+  "primaryColor": "#CA8A67",
+  "lightColor": "#E8B4A0",
+  "darkColor": "#8B5A3C",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Challenge",
+            "pages": [
+              "challenge/overview",
+              "challenge/task",
+              "challenge/benchmarks"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/simulator",
+              "architecture/vliw-simd",
+              "architecture/memory-model",
+              "architecture/instruction-set"
+            ]
+          },
+          {
+            "group": "Kernel Development",
+            "pages": [
+              "kernel/kernel-builder",
+              "kernel/optimization-strategies",
+              "kernel/reference-implementations"
+            ]
+          },
+          {
+            "group": "Debugging",
+            "pages": [
+              "debugging/trace-visualization",
+              "debugging/validation"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Classes",
+            "pages": [
+              "api/kernel-builder",
+              "api/machine",
+              "api/tree",
+              "api/input"
+            ]
+          },
+          {
+            "group": "Instructions",
+            "pages": [
+              "api/engines",
+              "api/instruction-format"
+            ]
+          },
+          {
+            "group": "Testing",
+            "pages": [
+              "api/testing"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Custom VLIW SIMD architecture simulator",
+    "Performance optimization challenge with multiple benchmark tiers",
+    "Tree traversal kernel with hashing operations",
+    "Perfetto trace visualization for debugging",
+    "Frozen test harness for validation",
+    "Reference implementations for comparison"
+  ],
+  "publicApiSurface": [
+    "KernelBuilder.build_kernel()",
+    "KernelBuilder.build()",
+    "Machine.__init__()",
+    "Machine.run()",
+    "Machine.step()",
+    "reference_kernel()",
+    "reference_kernel2()",
+    "Tree.generate()",
+    "Input.generate()",
+    "build_mem_image()",
+    "do_kernel_test()",
+    "myhash()"
+  ]
+}
