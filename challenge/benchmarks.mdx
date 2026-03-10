@@ -1,0 +1,216 @@
+---
+title: 'Performance Benchmarks'
+description: 'Performance tiers, submission requirements, and how your results compare to AI and human performance'
+---
+
+All benchmark numbers are measured in **clock cycles** from the simulated machine running the standard test configuration (forest_height=10, rounds=16, batch_size=256).
+
+## Baseline Performance
+
+<Card title="Starting Point" icon="flag">
+  **147,734 cycles** - The unoptimized scalar implementation included in this repository
+</Card>
+
+This is the `BASELINE` constant defined in `perf_takehome.py`. Any optimization that reduces cycle count below this threshold demonstrates improvement.
+
+### Speedup Calculation
+
+Your speedup is calculated as:
+
+```python
+speedup = 147734 / your_cycle_count
+```
+
+For example:
+- 18,532 cycles = **7.97x speedup**
+- 1,790 cycles = **82.5x speedup**
+- 1,363 cycles = **108.4x speedup**
+
+## Claude Performance Tiers
+
+<Note>
+  All Claude benchmarks below are for the **2-hour version** which started at 18,532 cycles (not the 147,734 baseline in this repo).
+</Note>
+
+| Model | Configuration | Cycles | Speedup | Notes |
+|-------|--------------|--------|---------|-------|
+| Claude Opus 4 | Many hours (test-time compute) | **2,164** | 68.3x | First major breakthrough |
+| Claude Opus 4.5 | Casual session | **1,790** | 82.5x | Matches best human 2hr performance |
+| Claude Opus 4.5 | 2 hours (harness) | **1,579** | 93.5x | Structured optimization session |
+| Claude Sonnet 4.5 | Many hours | **1,548** | 95.5x | Extended compute time |
+| Claude Opus 4.5 | 11.5 hours (harness) | **1,487** | 99.3x | Best at launch |
+| Claude Opus 4.5 | Improved harness | **1,363** | 108.4x | State-of-the-art AI performance |
+| Best human ever | Unknown | **???** | ???x | Substantially better (undisclosed) |
+
+<Tip>
+  The best human performance is **substantially better** than 1,363 cycles, but Anthropic hasn't disclosed exactly how much better.
+</Tip>
+
+## Updated Starting Point
+
+<Info>
+  When Anthropic updated the challenge to 2 hours, they provided starter code at **18,532 cycles** (7.97x faster than this repo's baseline). This gave candidates a head start with some basic optimizations already applied.
+</Info>
+
+If you reach this level from the 147,734 baseline, you've recovered the optimizations included in the updated starter code.
+
+## Submission Guidelines
+
+### Threshold for Recruiting Interest
+
+<Card title="Beat Claude Opus 4.5" icon="trophy">
+  If you optimize below **1,487 cycles**, Anthropic wants to hear from you!
+</Card>
+
+Email your submission to: [performance-recruiting@anthropic.com](mailto:performance-recruiting@anthropic.com)
+
+<Warning>
+  New model releases may change what threshold impresses the recruiting team. No guarantees that thresholds stay current with latest releases.
+</Warning>
+
+### What to Include
+
+<Steps>
+  <Step title="Your optimized code">
+    Include your modified `perf_takehome.py` or the specific `build_kernel()` implementation
+  </Step>
+  <Step title="Validation proof">
+    Show the output from `python tests/submission_tests.py` with your cycle count
+  </Step>
+  <Step title="Test integrity check">
+    Demonstrate that `git diff origin/main tests/` is empty
+  </Step>
+  <Step title="Resume (ideally)">
+    Attach your resume if you're interested in opportunities at Anthropic
+  </Step>
+  <Step title="Explanation (bonus)">
+    Describe your optimization approach and key insights
+  </Step>
+</Steps>
+
+## Validation Requirements
+
+<Warning title="Critical: Validate Before Submitting">
+  All first-day submissions below 1,300 cycles were invalid—language models had modified the tests to make the problem easier.
+</Warning>
+
+### Validation Commands
+
+Run these commands and **mention that you did so** when submitting:
+
+```bash
+# Verify tests folder is unchanged
+git diff origin/main tests/
+```
+
+<Info>This should produce **no output**. Any changes to the `tests/` folder invalidate your submission.</Info>
+
+```bash
+# Check which thresholds you pass
+python tests/submission_tests.py
+```
+
+<Info>This runs both correctness tests and speed benchmarks. Use the cycle count this prints, not the one from `perf_takehome.py`.</Info>
+
+### Test Thresholds
+
+The `submission_tests.py` file defines these test cases:
+
+```python
+class SpeedTests(unittest.TestCase):
+    def test_kernel_speedup(self):
+        assert cycles() < BASELINE  # 147734
+    
+    def test_kernel_updated_starting_point(self):
+        assert cycles() < 18532
+    
+    def test_opus4_many_hours(self):
+        assert cycles() < 2164
+    
+    def test_opus45_casual(self):
+        assert cycles() < 1790
+    
+    def test_opus45_2hr(self):
+        assert cycles() < 1579
+    
+    def test_sonnet45_many_hours(self):
+        assert cycles() < 1548
+    
+    def test_opus45_11hr(self):
+        assert cycles() < 1487
+    
+    def test_opus45_improved_harness(self):
+        assert cycles() < 1363
+```
+
+<Note>
+  You don't need to pass all tests to be impressive. The difficulty is non-linear—each tier requires increasingly sophisticated optimizations.
+</Note>
+
+## Correctness Testing
+
+Before speed testing, the suite runs:
+
+```python
+class CorrectnessTests(unittest.TestCase):
+    def test_kernel_correctness(self):
+        for i in range(8):
+            do_kernel_test(10, 16, 256)
+```
+
+This runs **8 iterations** with different random seeds to ensure your kernel produces correct results consistently.
+
+<Warning>
+  If correctness tests fail, your cycle count is artificially inflated to `BASELINE * 2` (295,468 cycles).
+</Warning>
+
+## Comparing Your Results
+
+### Interpreting Your Performance
+
+Here's a rough guide to what different cycle counts mean:
+
+<AccordionGroup>
+  <Accordion title="< 147,734 cycles: Any improvement">
+    You've beaten the baseline! This shows basic understanding of the problem and some successful optimizations.
+  </Accordion>
+  
+  <Accordion title="< 18,532 cycles: Updated starting point">
+    You've matched or exceeded the optimizations in the 2-hour version's starter code. Strong baseline optimization skills.
+  </Accordion>
+  
+  <Accordion title="< 2,164 cycles: Beat Opus 4 (many hours)">
+    You're in rarefied air. This required deep understanding of the machine architecture and creative algorithm changes.
+  </Accordion>
+  
+  <Accordion title="< 1,790 cycles: Match best human 2hr performance">
+    You've matched what top human candidates achieved in 2 hours. Excellent performance.
+  </Accordion>
+  
+  <Accordion title="< 1,487 cycles: Beat Opus 4.5 launch performance">
+    **Submit to Anthropic!** You've exceeded the best AI performance at Opus 4.5 launch. This demonstrates exceptional optimization skills.
+  </Accordion>
+  
+  <Accordion title="< 1,363 cycles: Beat improved AI harness">
+    You're approaching the best known AI performance. Anthropic will be very interested in your techniques.
+  </Accordion>
+  
+  <Accordion title="Approaching best human: Elite territory">
+    The best human performance is substantially better than 1,363 cycles. If you're getting close to this range, you're demonstrating world-class optimization ability.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Understand the Task" icon="book" href="/challenge/task">
+    Review task requirements and rules
+  </Card>
+  <Card title="Challenge Overview" icon="info-circle" href="/challenge/overview">
+    Learn about the challenge background
+  </Card>
+</CardGroup>
+
+<Tip>
+  Good luck! The journey from baseline to elite performance involves discovering increasingly subtle optimizations. Each breakthrough brings you closer to the theoretical minimum.
+</Tip>

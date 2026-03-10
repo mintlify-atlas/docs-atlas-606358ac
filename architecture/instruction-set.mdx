@@ -1,0 +1,756 @@
+---
+title: Instruction Set Architecture
+description: Complete reference for all engines and operations
+---
+
+## Instruction Format
+
+Instructions are dictionaries mapping engine names to lists of operation tuples:
+
+```python problem.py
+Engine = Literal["alu", "load", "store", "flow"]
+Instruction = dict[Engine, list[tuple]]
+
+# Example:
+instruction = {
+    "valu": [("*", 4, 0, 0), ("+", 8, 4, 0)],
+    "load": [("load", 16, 17)]
+}
+```
+
+<Note>
+**General rule**: Except for `const`, `jump`, and `store`, the **first operand is the destination** and subsequent operands are sources.
+</Note>
+
+## Engine Slot Limits
+
+Each engine has hardware limits on parallel execution:
+
+```python problem.py
+SLOT_LIMITS = {
+    "alu": 12,      # Scalar arithmetic/logic
+    "valu": 6,      # Vector arithmetic/logic
+    "load": 2,      # Memory reads and constants
+    "store": 2,     # Memory writes
+    "flow": 1,      # Control flow and special ops
+    "debug": 64,    # Debug operations (no cycle cost)
+}
+```
+
+---
+
+## ALU Engine (Scalar)
+
+**Slots per cycle:** 12
+
+**Format:** `("alu", (operation, dest, src1, src2))`
+
+All scalar operations on 32-bit integers with modular arithmetic (wrap at 2³²).
+
+### Arithmetic Operations
+
+| Operation | Syntax | Description | Example |
+|-----------|--------|-------------|---------|
+| `+` | `("+", dest, a, b)` | Addition (modulo 2³²) | `scratch[dest] = (scratch[a] + scratch[b]) % 2³²` |
+| `-` | `("-", dest, a, b)` | Subtraction (modulo 2³²) | `scratch[dest] = (scratch[a] - scratch[b]) % 2³²` |
+| `*` | `("*", dest, a, b)` | Multiplication (modulo 2³²) | `scratch[dest] = (scratch[a] * scratch[b]) % 2³²` |
+| `//` | `("//", dest, a, b)` | Integer division | `scratch[dest] = scratch[a] // scratch[b]` |
+| `cdiv` | `("cdiv", dest, a, b)` | Ceiling division | `scratch[dest] = (scratch[a] + scratch[b] - 1) // scratch[b]` |
+| `%` | `("%", dest, a, b)` | Modulo | `scratch[dest] = scratch[a] % scratch[b]` |
+
+### Bitwise Operations
+
+| Operation | Syntax | Description | Example |
+|-----------|--------|-------------|---------|
+| `^` | `("^", dest, a, b)` | XOR | `scratch[dest] = scratch[a] ^ scratch[b]` |
+| `&` | `("&", dest, a, b)` | AND | `scratch[dest] = scratch[a] & scratch[b]` |
+| `\|` | `("\|", dest, a, b)` | OR | `scratch[dest] = scratch[a] \| scratch[b]` |
+| `<<` | `("<<", dest, a, b)` | Left shift | `scratch[dest] = scratch[a] << scratch[b]` |
+| `>>` | `(">>", dest, a, b)` | Right shift (logical) | `scratch[dest] = scratch[a] >> scratch[b]` |
+
+### Comparison Operations
+
+| Operation | Syntax | Description | Returns |
+|-----------|--------|-------------|----------|
+| `<` | `("<", dest, a, b)` | Less than | `1` if `a < b`, else `0` |
+| `==` | `("==", dest, a, b)` | Equality | `1` if `a == b`, else `0` |
+
+```python problem.py
+def alu(self, core, op, dest, a1, a2):
+    a1 = core.scratch[a1]
+    a2 = core.scratch[a2]
+    match op:
+        case "+":
+            res = a1 + a2
+        case "*":
+            res = a1 * a2
+        case "<":
+            res = int(a1 < a2)
+        # ... etc
+    res = res % (2**32)
+    self.scratch_write[dest] = res
+```
+
+---
+
+## VALU Engine (Vector)
+
+**Slots per cycle:** 6
+
+**Vector length:** 8 (VLEN = 8)
+
+**Format:** `("valu", (operation, dest, src1, src2, ...))`
+
+Vector operations process 8 consecutive scratch addresses in parallel.
+
+### Binary Vector Operations
+
+Most ALU operations have vector equivalents:
+
+| Operation | Syntax | Description |
+|-----------|--------|-------------|
+| `+` | `("+", dest, a, b)` | Vector addition |
+| `-` | `("-", dest, a, b)` | Vector subtraction |
+| `*` | `("*", dest, a, b)` | Vector multiplication |
+| `//` | `("//", dest, a, b)` | Vector division |
+| `%` | `("%", dest, a, b)` | Vector modulo |
+| `^` | `("^", dest, a, b)` | Vector XOR |
+| `&` | `("&", dest, a, b)` | Vector AND |
+| `\|` | `("\|", dest, a, b)` | Vector OR |
+| `<<` | `("<<", dest, a, b)` | Vector left shift |
+| `>>` | `(">>", dest, a, b)` | Vector right shift |
+| `<` | `("<", dest, a, b)` | Vector less than (returns 0/1 per element) |
+| `==` | `("==", dest, a, b)` | Vector equality (returns 0/1 per element) |
+
+```python problem.py
+def valu(self, core, *slot):
+    match slot:
+        case (op, dest, a1, a2):
+            for i in range(VLEN):
+                self.alu(core, op, dest + i, a1 + i, a2 + i)
+```
+
+### Special Vector Operations
+
+<AccordionGroup>
+  <Accordion title="vbroadcast - Scalar to Vector">
+    **Syntax:** `("vbroadcast", dest, src)`
+    
+    Broadcast a scalar value to all vector elements:
+    
+    ```python
+    for i in range(8):
+        scratch[dest + i] = scratch[src]
+    ```
+    
+    **Example:**
+    ```python
+    # Broadcast constant to vector
+    const_addr = kb.scratch_const(42)
+    vec = kb.alloc_scratch("vec", 8)
+    kb.add("valu", ("vbroadcast", vec, const_addr))
+    # Result: vec = [42, 42, 42, 42, 42, 42, 42, 42]
+    ```
+  </Accordion>
+  
+  <Accordion title="multiply_add - Fused Multiply-Add">
+    **Syntax:** `("multiply_add", dest, a, b, c)`
+    
+    Compute `(a * b) + c` for each vector element:
+    
+    ```python
+    for i in range(8):
+        mul = (scratch[a + i] * scratch[b + i]) % (2**32)
+        scratch[dest + i] = (mul + scratch[c + i]) % (2**32)
+    ```
+    
+    **Example:**
+    ```python
+    # Compute dot product accumulation
+    kb.add("valu", ("multiply_add", acc, vec_a, vec_b, acc))
+    # acc[i] = (vec_a[i] * vec_b[i]) + acc[i]
+    ```
+    
+    <Note>
+    This is a **fused operation** - does the work of 2 vector operations in 1 slot!
+    </Note>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Load Engine
+
+**Slots per cycle:** 2
+
+**Format:** `("load", (operation, ...))`
+
+Handles reading from memory and loading constants.
+
+### Scalar Load Operations
+
+<Tabs>
+  <Tab title="load">
+    **Syntax:** `("load", dest, addr)`
+    
+    Load from memory address stored in scratch:
+    
+    ```python
+    scratch[dest] = mem[scratch[addr]]
+    ```
+    
+    **Example:**
+    ```python
+    # Load mem[100]
+    addr = kb.alloc_scratch("addr")
+    data = kb.alloc_scratch("data")
+    kb.add("load", ("const", addr, 100))
+    kb.add("load", ("load", data, addr))
+    ```
+  </Tab>
+  
+  <Tab title="const">
+    **Syntax:** `("const", dest, value)`
+    
+    Load immediate constant:
+    
+    ```python
+    scratch[dest] = value % (2**32)
+    ```
+    
+    **Example:**
+    ```python
+    # Load constant 42
+    const_addr = kb.alloc_scratch("my_const")
+    kb.add("load", ("const", const_addr, 42))
+    ```
+    
+    <Note>
+    Use `KernelBuilder.scratch_const()` to avoid reloading the same constant multiple times.
+    </Note>
+  </Tab>
+  
+  <Tab title="load_offset">
+    **Syntax:** `("load_offset", dest, addr, offset)`
+    
+    Load with compile-time offset:
+    
+    ```python
+    scratch[dest + offset] = mem[scratch[addr + offset]]
+    ```
+    
+    **Use case:** Unrolling vector loads when you want different offsets in parallel.
+  </Tab>
+</Tabs>
+
+### Vector Load Operations
+
+<Accordion title="vload - Load Vector">
+  **Syntax:** `("vload", dest, addr)`
+  
+  Load 8 contiguous memory words:
+  
+  ```python
+  addr_val = scratch[addr]  # addr is scalar
+  for i in range(8):
+      scratch[dest + i] = mem[addr_val + i]
+  ```
+  
+  **Example:**
+  ```python
+  # Load 8 values starting at mem[200]
+  addr = kb.alloc_scratch("addr")
+  vec = kb.alloc_scratch("vec", 8)
+  kb.add("load", ("const", addr, 200))
+  kb.add("load", ("vload", vec, addr))
+  # vec now contains mem[200..207]
+  ```
+  
+  <Warning>
+  The `addr` operand is a **scalar** scratch address containing the base memory pointer.
+  </Warning>
+</Accordion>
+
+```python problem.py
+def load(self, core, *slot):
+    match slot:
+        case ("load", dest, addr):
+            self.scratch_write[dest] = self.mem[core.scratch[addr]]
+        case ("vload", dest, addr):
+            addr = core.scratch[addr]
+            for vi in range(VLEN):
+                self.scratch_write[dest + vi] = self.mem[addr + vi]
+        case ("const", dest, val):
+            self.scratch_write[dest] = (val) % (2**32)
+```
+
+---
+
+## Store Engine
+
+**Slots per cycle:** 2
+
+**Format:** `("store", (operation, ...))`
+
+Handles writing to memory.
+
+<Tabs>
+  <Tab title="store">
+    **Syntax:** `("store", addr, src)`
+    
+    Store to memory address stored in scratch:
+    
+    ```python
+    mem[scratch[addr]] = scratch[src]
+    ```
+    
+    **Example:**
+    ```python
+    # Store result to mem[150]
+    addr = kb.alloc_scratch("addr")
+    result = kb.alloc_scratch("result")
+    kb.add("load", ("const", addr, 150))
+    # ... compute result ...
+    kb.add("store", ("store", addr, result))
+    ```
+    
+    <Note>
+    Unlike most operations, `addr` is the **first** operand, not the destination!
+    </Note>
+  </Tab>
+  
+  <Tab title="vstore">
+    **Syntax:** `("vstore", addr, src)`
+    
+    Store 8 contiguous words to memory:
+    
+    ```python
+    addr_val = scratch[addr]  # addr is scalar
+    for i in range(8):
+        mem[addr_val + i] = scratch[src + i]
+    ```
+    
+    **Example:**
+    ```python
+    # Store 8 values to mem[300..307]
+    addr = kb.alloc_scratch("addr")
+    vec = kb.alloc_scratch("vec", 8)
+    # ... compute vec values ...
+    kb.add("load", ("const", addr, 300))
+    kb.add("store", ("vstore", addr, vec))
+    ```
+  </Tab>
+</Tabs>
+
+```python problem.py
+def store(self, core, *slot):
+    match slot:
+        case ("store", addr, src):
+            addr = core.scratch[addr]
+            self.mem_write[addr] = core.scratch[src]
+        case ("vstore", addr, src):
+            addr = core.scratch[addr]
+            for vi in range(VLEN):
+                self.mem_write[addr + vi] = core.scratch[src + vi]
+```
+
+---
+
+## Flow Engine
+
+**Slots per cycle:** 1
+
+**Format:** `("flow", (operation, ...))`
+
+Handles control flow, conditional operations, and special instructions.
+
+### Conditional Operations
+
+<Tabs>
+  <Tab title="select">
+    **Syntax:** `("select", dest, cond, a, b)`
+    
+    Scalar conditional select (ternary operator):
+    
+    ```python
+    scratch[dest] = scratch[a] if scratch[cond] != 0 else scratch[b]
+    ```
+    
+    **Example:**
+    ```python
+    # dest = max(a, b)
+    is_greater = kb.alloc_scratch("is_greater")
+    result = kb.alloc_scratch("result")
+    kb.add("alu", ("<", is_greater, b, a))  # is_greater = (b < a)
+    kb.add("flow", ("select", result, is_greater, a, b))
+    ```
+  </Tab>
+  
+  <Tab title="vselect">
+    **Syntax:** `("vselect", dest, cond, a, b)`
+    
+    Vector conditional select:
+    
+    ```python
+    for i in range(8):
+        scratch[dest + i] = (scratch[a + i] if scratch[cond + i] != 0 
+                             else scratch[b + i])
+    ```
+    
+    **Example:**
+    ```python
+    # Clamp vector to minimum value
+    min_vec = kb.alloc_scratch("min_vec", 8)
+    is_less = kb.alloc_scratch("is_less", 8)
+    kb.add("valu", ("<", is_less, data_vec, min_vec))
+    kb.add("flow", ("vselect", data_vec, is_less, min_vec, data_vec))
+    ```
+  </Tab>
+</Tabs>
+
+### Arithmetic with Immediate
+
+<Accordion title="add_imm - Add Immediate">
+  **Syntax:** `("add_imm", dest, a, imm)`
+  
+  Add immediate value without loading constant:
+  
+  ```python
+  scratch[dest] = (scratch[a] + imm) % (2**32)
+  ```
+  
+  **Example:**
+  ```python
+  # Increment counter
+  counter = kb.alloc_scratch("counter")
+  kb.add("flow", ("add_imm", counter, counter, 1))
+  ```
+  
+  <Note>
+  This saves a load slot compared to loading a constant and using ALU add.
+  </Note>
+</Accordion>
+
+### Branch Operations
+
+<AccordionGroup>
+  <Accordion title="jump - Unconditional Jump">
+    **Syntax:** `("jump", addr)`
+    
+    Jump to instruction address:
+    
+    ```python
+    core.pc = addr
+    ```
+    
+    **Note:** `addr` is a **direct instruction address**, not a scratch address!
+  </Accordion>
+  
+  <Accordion title="cond_jump - Conditional Jump">
+    **Syntax:** `("cond_jump", cond, addr)`
+    
+    Jump if condition is non-zero:
+    
+    ```python
+    if scratch[cond] != 0:
+        core.pc = addr
+    ```
+  </Accordion>
+  
+  <Accordion title="cond_jump_rel - Conditional Relative Jump">
+    **Syntax:** `("cond_jump_rel", cond, offset)`
+    
+    Jump relative to current PC:
+    
+    ```python
+    if scratch[cond] != 0:
+        core.pc += offset
+    ```
+    
+    **Example use:** Loop back by `-10` instructions.
+  </Accordion>
+  
+  <Accordion title="jump_indirect - Indirect Jump">
+    **Syntax:** `("jump_indirect", addr)`
+    
+    Jump to address stored in scratch:
+    
+    ```python
+    core.pc = scratch[addr]
+    ```
+    
+    **Use case:** Computed jumps, function pointers, dispatch tables.
+  </Accordion>
+</AccordionGroup>
+
+### Control Operations
+
+<Tabs>
+  <Tab title="halt">
+    **Syntax:** `("halt",)`
+    
+    Stop core execution:
+    
+    ```python
+    core.state = CoreState.STOPPED
+    ```
+    
+    Use at the end of your program.
+  </Tab>
+  
+  <Tab title="pause">
+    **Syntax:** `("pause",)`
+    
+    Pause core execution:
+    
+    ```python
+    core.state = CoreState.PAUSED
+    ```
+    
+    Can be resumed by calling `machine.run()` again.
+    
+    <Note>
+    Pause instructions are used to sync with the reference kernel's `yield` statements for debugging. The submission harness ignores them.
+    </Note>
+  </Tab>
+  
+  <Tab title="trace_write">
+    **Syntax:** `("trace_write", val)`
+    
+    Write value to trace buffer:
+    
+    ```python
+    core.trace_buf.append(scratch[val])
+    ```
+    
+    Use for debugging without affecting memory.
+  </Tab>
+</Tabs>
+
+### Core Information
+
+<Accordion title="coreid - Get Core ID">
+  **Syntax:** `("coreid", dest)`
+  
+  Get current core ID:
+  
+  ```python
+  scratch[dest] = core.id
+  ```
+  
+  **Use case:** Multi-core programs where each core needs its ID for work partitioning.
+</Accordion>
+
+```python problem.py
+def flow(self, core, *slot):
+    match slot:
+        case ("select", dest, cond, a, b):
+            self.scratch_write[dest] = (
+                core.scratch[a] if core.scratch[cond] != 0 else core.scratch[b]
+            )
+        case ("halt",):
+            core.state = CoreState.STOPPED
+        case ("cond_jump", cond, addr):
+            if core.scratch[cond] != 0:
+                core.pc = addr
+```
+
+---
+
+## Debug Engine
+
+**Slots per cycle:** 64
+
+**Cycle cost:** 0 (debug operations are free!)
+
+**Format:** `("debug", (operation, ...))`
+
+### Debug Operations
+
+<Tabs>
+  <Tab title="compare">
+    **Syntax:** `("compare", loc, key)`
+    
+    Assert scalar value matches reference trace:
+    
+    ```python
+    ref = value_trace[key]
+    res = scratch[loc]
+    assert res == ref, f"{res} != {ref} for {key}"
+    ```
+    
+    **Example:**
+    ```python
+    kb.add("debug", ("compare", tmp_val, (round, i, "val")))
+    ```
+  </Tab>
+  
+  <Tab title="vcompare">
+    **Syntax:** `("vcompare", loc, keys)`
+    
+    Assert vector values match reference trace:
+    
+    ```python
+    ref = [value_trace[key] for key in keys]
+    res = scratch[loc : loc + 8]
+    assert res == ref, f"{res} != {ref} for {keys}"
+    ```
+    
+    **Example:**
+    ```python
+    keys = [(round, i, "hash_stage", vi) for vi in range(8)]
+    kb.add("debug", ("vcompare", vec_hash, keys))
+    ```
+  </Tab>
+  
+  <Tab title="comment">
+    **Syntax:** `("comment", text)`
+    
+    Add comment for debugging (ignored by simulator):
+    
+    ```python
+    kb.add("debug", ("comment", "Starting main loop"))
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Debug instructions are **disabled in the submission harness** (via `enable_debug=False`), so you can leave them in your code without performance impact.
+</Note>
+
+---
+
+## Real-World Example: Hash Function
+
+Here's how the reference kernel implements a hash stage:
+
+```python perf_takehome.py
+def build_hash(self, val_hash_addr, tmp1, tmp2, round, i):
+    """Build instructions for one complete hash (6 stages)"""
+    slots = []
+    
+    HASH_STAGES = [
+        ("+", 0x7ED55D16, "+", "<<", 12),
+        ("^", 0xC761C23C, "^", ">>", 19),
+        # ... 4 more stages
+    ]
+    
+    for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
+        # Load constant if not already loaded
+        const1 = self.scratch_const(val1)
+        const3 = self.scratch_const(val3)
+        
+        # Stage computation:
+        # tmp1 = val_hash op1 val1
+        slots.append(("alu", (op1, tmp1, val_hash_addr, const1)))
+        
+        # tmp2 = val_hash op3 val3
+        slots.append(("alu", (op3, tmp2, val_hash_addr, const3)))
+        
+        # val_hash = tmp1 op2 tmp2
+        slots.append(("alu", (op2, val_hash_addr, tmp1, tmp2)))
+        
+        # Debug check
+        slots.append(("debug", ("compare", val_hash_addr, 
+                                (round, i, "hash_stage", hi))))
+    
+    return slots
+```
+
+This generates 24 slots (4 per stage × 6 stages) that could be packed into just 2 instruction bundles with good VLIW packing!
+
+---
+
+## Optimization Tips
+
+<AccordionGroup>
+  <Accordion title="Pack instructions into bundles">
+    The reference kernel creates one instruction per slot:
+    
+    ```python
+    # Bad: 3 cycles
+    kb.add("alu", ("+", 0, 1, 2))
+    kb.add("alu", ("-", 3, 4, 5))
+    kb.add("load", ("load", 6, 7))
+    ```
+    
+    Pack into a single bundle:
+    
+    ```python
+    # Good: 1 cycle
+    kb.instrs.append({
+        "alu": [("+", 0, 1, 2), ("-", 3, 4, 5)],
+        "load": [("load", 6, 7)]
+    })
+    ```
+  </Accordion>
+  
+  <Accordion title="Vectorize when possible">
+    Replace scalar loops with vector operations:
+    
+    ```python
+    # Bad: 8 instructions (8 cycles if not packed)
+    for i in range(8):
+        kb.add("alu", ("+", dest+i, a+i, b+i))
+    
+    # Good: 1 instruction (1 slot)
+    kb.add("valu", ("+", dest, a, b))
+    ```
+  </Accordion>
+  
+  <Accordion title="Reuse constants">
+    Use `scratch_const()` to avoid reloading:
+    
+    ```python
+    # Bad: loads 0 multiple times
+    zero1 = kb.alloc_scratch()
+    kb.add("load", ("const", zero1, 0))
+    zero2 = kb.alloc_scratch()
+    kb.add("load", ("const", zero2, 0))
+    
+    # Good: loads once, reuses address
+    zero = kb.scratch_const(0)
+    # ... use zero everywhere
+    ```
+  </Accordion>
+  
+  <Accordion title="Use multiply_add when possible">
+    ```python
+    # Bad: 2 vector slots
+    kb.add("valu", ("*", tmp, a, b))
+    kb.add("valu", ("+", dest, tmp, c))
+    
+    # Good: 1 vector slot
+    kb.add("valu", ("multiply_add", dest, a, b, c))
+    ```
+  </Accordion>
+  
+  <Accordion title="Minimize memory access">
+    Keep frequently-used data in scratch space:
+    
+    ```python
+    # Bad: load same value repeatedly
+    for i in range(100):
+        kb.add("load", ("load", tmp, addr))
+        # ... use tmp
+    
+    # Good: load once, keep in scratch
+    kb.add("load", ("load", cached, addr))
+    for i in range(100):
+        # ... use cached
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Simulator Overview" icon="computer" color="#CA8A67" href="/architecture/simulator">
+    Learn about the execution model
+  </Card>
+  <Card title="Building Your Kernel" icon="wrench" color="#CA8A67" href="/kernel/kernel-builder">
+    Start optimizing your implementation
+  </Card>
+</CardGroup>

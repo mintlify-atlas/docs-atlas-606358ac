@@ -1,0 +1,269 @@
+---
+title: VLIW & SIMD Concepts
+description: Understanding Very Large Instruction Word and Single Instruction Multiple Data execution
+---
+
+## What is VLIW?
+
+**VLIW (Very Large Instruction Word)** is a parallel execution model where multiple operations execute simultaneously within a single instruction cycle.
+
+In this architecture, each "instruction" is actually an **instruction bundle** containing operations for multiple engines:
+
+```python
+# Example instruction bundle - all operations execute in parallel
+instr = {
+    "valu": [("*", 4, 0, 0), ("+", 8, 4, 0)],
+    "load": [("load", 16, 17)]
+}
+```
+
+This single instruction executes:
+- Two vector ALU operations in parallel
+- One load operation in parallel
+
+All happening **in the same cycle**.
+
+## Engine Slot Limits
+
+Each engine can execute multiple "slots" per cycle, limited by hardware constraints:
+
+```python problem.py
+SLOT_LIMITS = {
+    "alu": 12,      # 12 scalar ALU operations per cycle
+    "valu": 6,      # 6 vector ALU operations per cycle
+    "load": 2,      # 2 load operations per cycle
+    "store": 2,     # 2 store operations per cycle
+    "flow": 1,      # 1 control flow operation per cycle
+    "debug": 64,    # 64 debug operations per cycle (free)
+}
+```
+
+<Note>
+The simulator enforces these limits with assertions. Exceeding a slot limit will cause a runtime error.
+</Note>
+
+### Maximizing Parallelism
+
+To optimize performance, pack as many operations as possible into each instruction bundle:
+
+<Tabs>
+  <Tab title="Poor packing (6 cycles)">
+    ```python
+    # Each operation in its own instruction
+    [
+        {"alu": [("+", 0, 1, 2)]},
+        {"alu": [("-", 3, 4, 5)]},
+        {"alu": [("*", 6, 7, 8)]},
+        {"load": [("load", 9, 10)]},
+        {"load": [("load", 11, 12)]},
+        {"store": [("store", 13, 14)]}
+    ]
+    ```
+  </Tab>
+  <Tab title="Good packing (1 cycle)">
+    ```python
+    # All operations in one instruction bundle
+    [{
+        "alu": [
+            ("+", 0, 1, 2),
+            ("-", 3, 4, 5),
+            ("*", 6, 7, 8)
+        ],
+        "load": [
+            ("load", 9, 10),
+            ("load", 11, 12)
+        ],
+        "store": [("store", 13, 14)]
+    }]
+    ```
+  </Tab>
+</Tabs>
+
+The well-packed version executes **6× faster**!
+
+## What is SIMD?
+
+**SIMD (Single Instruction Multiple Data)** allows one instruction to operate on multiple data elements simultaneously.
+
+### Vector Length
+
+```python problem.py
+VLEN = 8  # All vector operations work on 8 elements
+```
+
+Vector operations process **8 consecutive 32-bit words** in scratch space:
+
+```python
+# Vector add: adds 8 pairs of elements in parallel
+("valu", ("+", dest, a, b))
+
+# Equivalent to 8 scalar operations:
+# dest[0] = a[0] + b[0]
+# dest[1] = a[1] + b[1]
+# ...
+# dest[7] = a[7] + b[7]
+```
+
+## Vector vs Scalar Operations
+
+<Tabs>
+  <Tab title="Scalar ALU">
+    **Operations**: Single 32-bit word operations
+    
+    **Slots**: 12 per cycle
+    
+    **Example**:
+    ```python
+    # Multiply two scalars
+    ("alu", ("*", dest, a, b))
+    # dest ← a × b (single multiplication)
+    ```
+    
+    **Use for**: Control logic, addresses, loop counters, single values
+  </Tab>
+  <Tab title="Vector ALU">
+    **Operations**: 8-element vector operations
+    
+    **Slots**: 6 per cycle
+    
+    **Example**:
+    ```python
+    # Multiply two vectors
+    ("valu", ("*", dest, a, b))
+    # dest[i] ← a[i] × b[i] for i in 0..7 (8 multiplications)
+    ```
+    
+    **Use for**: Data-parallel computations, batch processing
+  </Tab>
+</Tabs>
+
+<Note>
+One `valu` operation does the work of **8 scalar operations** using just 1 slot!
+</Note>
+
+### Vector Operation Examples
+
+#### Broadcasting
+
+Copy a scalar value to all elements of a vector:
+
+```python problem.py
+# vbroadcast: dest[i] = src for all i in 0..7
+("valu", ("vbroadcast", dest, src))
+
+# Implementation:
+for i in range(VLEN):
+    self.scratch_write[dest + i] = core.scratch[src]
+```
+
+#### Vector Memory Operations
+
+Load/store 8 contiguous elements:
+
+```python problem.py
+# Load 8 consecutive memory locations
+("load", ("vload", dest, addr))
+# dest[i] = mem[addr + i] for i in 0..7
+
+# Store 8 consecutive memory locations
+("store", ("vstore", addr, src))
+# mem[addr + i] = src[i] for i in 0..7
+```
+
+<Warning>
+Vector load/store only supports **contiguous** memory access. For non-contiguous (strided or gathered) access, you must use scalar loads.
+</Warning>
+
+#### Fused Multiply-Add
+
+A special high-performance operation:
+
+```python problem.py
+# multiply_add: dest[i] = (a[i] * b[i]) + c[i]
+("valu", ("multiply_add", dest, a, b, c))
+
+# Does work of 2 vector ops in 1 slot!
+```
+
+## Instruction Packing Example
+
+Here's how the reference kernel builds an instruction from slots:
+
+```python perf_takehome.py
+class KernelBuilder:
+    def build(self, slots: list[tuple[Engine, tuple]], vliw: bool = False):
+        # Simple slot packing: one slot per instruction bundle
+        instrs = []
+        for engine, slot in slots:
+            instrs.append({engine: [slot]})
+        return instrs
+```
+
+This naive implementation creates one instruction per slot. For better performance, you should pack multiple slots into each instruction:
+
+```python
+# Instead of:
+slots = [
+    ("alu", ("+", 0, 1, 2)),
+    ("alu", ("-", 3, 4, 5)),
+    ("load", ("load", 6, 7))
+]
+instructions = [{"alu": [("+", 0, 1, 2)]},
+                {"alu": [("-", 3, 4, 5)]},
+                {"load": [("load", 6, 7)]}]
+
+# Do this:
+instructions = [{
+    "alu": [
+        ("+", 0, 1, 2),
+        ("-", 3, 4, 5)
+    ],
+    "load": [("load", 6, 7)]
+}]
+```
+
+## Performance Implications
+
+### Throughput Comparison
+
+| Operation Type | Slots/Cycle | Elements/Slot | Throughput |
+|----------------|-------------|---------------|------------|
+| Scalar ALU | 12 | 1 | 12 ops/cycle |
+| Vector ALU | 6 | 8 | **48 ops/cycle** |
+| Scalar Load | 2 | 1 | 2 loads/cycle |
+| Vector Load | 2 | 8 | **16 loads/cycle** |
+
+<Note>
+Vector operations provide **4× throughput** for data-parallel work!
+</Note>
+
+### When to Use Each
+
+<AccordionGroup>
+  <Accordion title="Use scalar operations for...">
+    - Computing memory addresses
+    - Loop counters and conditions
+    - Branch decisions
+    - Single values that don't have parallel analogs
+    - Operations that can't be vectorized (dependencies)
+  </Accordion>
+  
+  <Accordion title="Use vector operations for...">
+    - Processing batches of independent data
+    - Element-wise array operations
+    - Loading/storing contiguous memory blocks
+    - Parallel hash computations
+    - Any operation that can be expressed as "do the same thing to N items"
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Memory Model" icon="memory" color="#CA8A67" href="/architecture/memory-model">
+    Learn about memory layout and scratch space
+  </Card>
+  <Card title="Instruction Set" icon="code" color="#CA8A67" href="/architecture/instruction-set">
+    Complete reference for all operations
+  </Card>
+</CardGroup>

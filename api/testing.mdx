@@ -1,0 +1,327 @@
+---
+title: 'Testing API'
+description: 'Testing utilities and functions for validating kernel implementations'
+---
+
+## Overview
+
+The testing module provides comprehensive utilities for validating kernel correctness and measuring performance. It includes functions for running individual tests, test classes for organized testing, and utilities for building memory images and debugging.
+
+---
+
+## do_kernel_test()
+
+Executes a kernel test with specified parameters and validates correctness against the reference implementation.
+
+<ParamField path="forest_height" type="int" required>
+  Height of the binary tree structure. Determines the number of nodes as `2^(height+1) - 1`.
+</ParamField>
+
+<ParamField path="rounds" type="int" required>
+  Number of rounds to execute the kernel traversal.
+</ParamField>
+
+<ParamField path="batch_size" type="int" required>
+  Number of parallel tree traversals to process in the batch.
+</ParamField>
+
+<ParamField path="seed" type="int" default={123}>
+  Random seed for reproducible test generation.
+</ParamField>
+
+<ParamField path="trace" type="bool" default={false}>
+  Enable Perfetto trace generation for performance visualization.
+</ParamField>
+
+<ParamField path="prints" type="bool" default={false}>
+  Enable detailed debug output during execution.
+</ParamField>
+
+### Returns
+
+Returns the total cycle count (`int`) for the kernel execution.
+
+### Example
+
+```python
+from perf_takehome import do_kernel_test
+
+# Run a basic performance test
+cycles = do_kernel_test(
+    forest_height=10,
+    rounds=16,
+    batch_size=256
+)
+print(f"Completed in {cycles} cycles")
+
+# Run with tracing enabled for debugging
+do_kernel_test(
+    forest_height=4,
+    rounds=8,
+    batch_size=64,
+    trace=True,
+    prints=True
+)
+```
+
+---
+
+## Tests Class
+
+Unit test class containing standard test cases for kernel validation.
+
+### test_kernel_cycles()
+
+Standard performance test that measures cycle count for a full-scale workload.
+
+```python
+import unittest
+from perf_takehome import Tests
+
+class MyTests(unittest.TestCase):
+    def test_performance(self):
+        # Runs: do_kernel_test(10, 16, 256)
+        Tests().test_kernel_cycles()
+```
+
+**Workload:** `forest_height=10`, `rounds=16`, `batch_size=256`
+
+### test_kernel_trace()
+
+Generates a Perfetto trace for performance visualization and debugging.
+
+```python
+from perf_takehome import Tests
+
+# Generate trace file
+Tests().test_kernel_trace()
+
+# View with: python watch_trace.py
+```
+
+**Workload:** `forest_height=10`, `rounds=16`, `batch_size=256` with tracing enabled
+
+**Output:** Creates `trace.json` for visualization in Perfetto UI
+
+---
+
+## build_mem_image()
+
+Constructs a flat memory layout from tree and input data structures.
+
+<ParamField path="t" type="Tree" required>
+  Tree structure containing height and node values.
+</ParamField>
+
+<ParamField path="inp" type="Input" required>
+  Input batch containing indices, values, and round count.
+</ParamField>
+
+### Returns
+
+Returns a `list[int]` representing the flattened memory image with the following header structure:
+
+| Offset | Description |
+|--------|-------------|
+| 0 | Number of rounds |
+| 1 | Number of nodes |
+| 2 | Batch size |
+| 3 | Tree height |
+| 4 | Pointer to forest values |
+| 5 | Pointer to input indices |
+| 6 | Pointer to input values |
+| 7 | Pointer to extra room |
+
+### Example
+
+```python
+from problem import Tree, Input, build_mem_image
+import random
+
+random.seed(123)
+forest = Tree.generate(height=8)
+inp = Input.generate(forest, batch_size=128, rounds=12)
+
+# Build flat memory layout
+mem = build_mem_image(forest, inp)
+
+# Access header values
+rounds = mem[0]
+n_nodes = mem[1]
+batch_size = mem[2]
+forest_values_p = mem[4]
+```
+
+---
+
+## Submission Tests
+
+The `tests/submission_tests.py` module contains the official test suite for validating submissions.
+
+### CorrectnessTests
+
+Validates kernel correctness across multiple randomized runs.
+
+```python
+from tests.submission_tests import CorrectnessTests
+
+# Run correctness validation
+CorrectnessTests().test_kernel_correctness()
+```
+
+**Test Coverage:**
+- 8 randomized test cases
+- `forest_height=10`, `rounds=16`, `batch_size=256`
+- Validates output values against reference implementation
+
+### SpeedTests
+
+Performance benchmarks with progressive difficulty thresholds.
+
+| Test | Threshold (cycles) | Description |
+|------|-------------------|-------------|
+| `test_kernel_speedup()` | < 147,734 | Beat baseline |
+| `test_kernel_updated_starting_point()` | < 18,532 | Modern starter code |
+| `test_opus4_many_hours()` | < 2,164 | Extended optimization |
+| `test_opus45_casual()` | < 1,790 | Best human 2-hour |
+| `test_opus45_2hr()` | < 1,579 | AI 2-hour harness |
+| `test_sonnet45_many_hours()` | < 1,548 | Extended AI compute |
+| `test_opus45_11hr()` | < 1,487 | 11.5 hour harness |
+| `test_opus45_improved_harness()` | < 1,363 | Advanced harness |
+
+```python
+from tests.submission_tests import SpeedTests
+
+# Run performance benchmarks
+SpeedTests().test_kernel_speedup()
+```
+
+<Note>
+**Baseline:** 147,734 cycles. You don't need to pass all speed tests to succeed - the difficulty curve is non-linear.
+</Note>
+
+---
+
+## DebugInfo Class
+
+Contains debugging metadata for kernel execution analysis.
+
+<ParamField path="scratch_map" type="dict[int, tuple[str, int]]" required>
+  Maps scratch memory addresses to (name, length) pairs for human-readable debugging.
+</ParamField>
+
+### Example
+
+```python
+from perf_takehome import KernelBuilder
+
+kb = KernelBuilder()
+kb.alloc_scratch("tmp1", 1)
+kb.alloc_scratch("tmp2", 1)
+
+# Access debug info
+debug_info = kb.debug_info()
+print(debug_info.scratch_map)
+# Output: {0: ('tmp1', 1), 1: ('tmp2', 1)}
+```
+
+### Usage in Machine
+
+The `scratch_map` enables readable variable names in traces and debug output:
+
+```python
+from problem import Machine
+
+machine = Machine(
+    mem,
+    instructions,
+    debug_info,
+    trace=True
+)
+
+# Debug output shows variable names instead of addresses
+print(machine.scratch_map(machine.cores[0]))
+# Output: {'tmp1': [42], 'tmp2': [17], ...}
+```
+
+---
+
+## Running Tests
+
+### Command Line
+
+```bash
+# Run all tests
+python perf_takehome.py
+
+# Run specific test
+python perf_takehome.py Tests.test_kernel_cycles
+
+# Run submission validation
+python tests/submission_tests.py
+
+# Generate and view trace
+python perf_takehome.py Tests.test_kernel_trace
+python watch_trace.py  # In separate terminal
+```
+
+### Python API
+
+```python
+import unittest
+from perf_takehome import Tests
+from tests.submission_tests import CorrectnessTests, SpeedTests
+
+# Load and run tests
+suite = unittest.TestLoader().loadTestsFromTestCase(Tests)
+runner = unittest.TextTestRunner(verbosity=2)
+result = runner.run(suite)
+
+# Check specific thresholds
+if __name__ == "__main__":
+    unittest.main()
+```
+
+<Warning>
+Do not modify files in the `tests/` directory. The submission system uses a frozen copy of the simulator and reference implementation.
+</Warning>
+
+---
+
+## Performance Analysis
+
+### Baseline Reference
+
+The baseline kernel implementation achieves **147,734 cycles** for the standard workload (`forest_height=10`, `rounds=16`, `batch_size=256`).
+
+### Trace Visualization
+
+Generate performance traces for detailed analysis:
+
+1. Run test with tracing:
+```python
+do_kernel_test(10, 16, 256, trace=True)
+```
+
+2. View in Perfetto:
+```bash
+python watch_trace.py
+```
+
+The trace shows:
+- Instruction execution timeline per engine
+- Scratch variable value changes
+- Slot utilization across cycles
+- Critical path analysis
+
+<style>
+{`
+  .markdown h2 {
+    color: #CA8A67;
+  }
+  .markdown table th {
+    background-color: #CA8A67;
+    color: white;
+  }
+`}
+</style>

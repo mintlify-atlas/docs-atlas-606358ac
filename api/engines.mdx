@@ -1,0 +1,243 @@
+---
+title: 'Engine Reference'
+description: 'Complete reference for all execution engines and their operations'
+---
+
+<Note>
+The machine supports multiple execution engines that can run in parallel within a single instruction bundle. Each engine has specific slot limits defined in `SLOT_LIMITS`.
+</Note>
+
+## Slot Limits
+
+Each engine can execute a limited number of operations per cycle:
+
+| Engine | Slots per Cycle |
+|--------|----------------|
+| `alu` | 12 |
+| `valu` | 6 |
+| `load` | 2 |
+| `store` | 2 |
+| `flow` | 1 |
+| `debug` | 64 |
+
+<Note>
+From `problem.py:48-55` - `SLOT_LIMITS` dictionary defines the maximum parallel operations per engine.
+</Note>
+
+## ALU Engine
+
+The Arithmetic Logic Unit performs scalar operations on 32-bit words.
+
+### Operations
+
+| Operation | Format | Description |
+|-----------|--------|-------------|
+| `+` | `("+", dest, a, b)` | Addition: `dest = a + b` |
+| `-` | `("-", dest, a, b)` | Subtraction: `dest = a - b` |
+| `*` | `("*", dest, a, b)` | Multiplication: `dest = a * b` |
+| `//` | `("//", dest, a, b)` | Integer division: `dest = a // b` |
+| `cdiv` | `("cdiv", dest, a, b)` | Ceiling division: `dest = (a + b - 1) // b` |
+| `^` | `("^", dest, a, b)` | Bitwise XOR: `dest = a ^ b` |
+| `&` | `("&", dest, a, b)` | Bitwise AND: `dest = a & b` |
+| `\|` | `("\|", dest, a, b)` | Bitwise OR: `dest = a \| b` |
+| `<<` | `("<<", dest, a, b)` | Left shift: `dest = a << b` |
+| `>>` | `(">>", dest, a, b)` | Right shift: `dest = a >> b` |
+| `%` | `("%", dest, a, b)` | Modulo: `dest = a % b` |
+| `<` | `("<", dest, a, b)` | Less than: `dest = 1 if a < b else 0` |
+| `==` | `("==", dest, a, b)` | Equality: `dest = 1 if a == b else 0` |
+
+<Note>
+All ALU operations wrap results modulo 2^32. See `problem.py:219-252`.
+</Note>
+
+### Example
+
+```python
+# Compute: result = (x + y) * z
+instruction = {
+    "alu": [
+        ("+", 10, 0, 1),  # scratch[10] = scratch[0] + scratch[1]
+        ("*", 11, 10, 2)  # scratch[11] = scratch[10] * scratch[2]
+    ]
+}
+```
+
+## VALU Engine
+
+Vector ALU performs SIMD operations on vectors of `VLEN=8` elements.
+
+### Operations
+
+| Operation | Format | Description |
+|-----------|--------|-------------|
+| `vbroadcast` | `("vbroadcast", dest, src)` | Broadcast scalar to vector: `dest[i] = src` for all i |
+| `multiply_add` | `("multiply_add", dest, a, b, c)` | Fused multiply-add: `dest[i] = (a[i] * b[i]) + c[i]` |
+| Vector ops | `(op, dest, a, b)` | Apply ALU op element-wise: `dest[i] = a[i] op b[i]` |
+
+<Note>
+Vector operations apply the same ALU operations element-wise across `VLEN=8` contiguous scratch addresses. See `problem.py:254-267`.
+</Note>
+
+### Example
+
+```python
+# Broadcast scalar and perform vector multiply-add
+instruction = {
+    "valu": [
+        ("vbroadcast", 100, 50),          # Broadcast scratch[50] to vector at 100-107
+        ("multiply_add", 200, 100, 110, 120)  # scratch[200+i] = scratch[100+i] * scratch[110+i] + scratch[120+i]
+    ]
+}
+```
+
+## LOAD Engine
+
+Loads data from main memory into scratch space.
+
+### Operations
+
+| Operation | Format | Description |
+|-----------|--------|-------------|
+| `load` | `("load", dest, addr)` | Load single word: `dest = mem[scratch[addr]]` |
+| `load_offset` | `("load_offset", dest, addr, offset)` | Load with offset: `dest+offset = mem[scratch[addr+offset]]` |
+| `vload` | `("vload", dest, addr)` | Vector load: Load 8 words from `mem[scratch[addr]:scratch[addr]+8]` |
+| `const` | `("const", dest, val)` | Load immediate: `dest = val` |
+
+<Note>
+The `addr` parameter is always a scratch address (indirect). The actual memory address is read from scratch. See `problem.py:269-286`.
+</Note>
+
+### Example
+
+```python
+# Load constants and data from memory
+instruction = {
+    "load": [
+        ("const", 0, 42),      # scratch[0] = 42
+        ("load", 10, 0)        # scratch[10] = mem[scratch[0]] = mem[42]
+    ]
+}
+```
+
+## STORE Engine
+
+Stores data from scratch space to main memory.
+
+### Operations
+
+| Operation | Format | Description |
+|-----------|--------|-------------|
+| `store` | `("store", addr, src)` | Store single word: `mem[scratch[addr]] = scratch[src]` |
+| `vstore` | `("vstore", addr, src)` | Vector store: Store 8 words from scratch to `mem[scratch[addr]:scratch[addr]+8]` |
+
+<Note>
+Store operations write to memory at the end of the cycle after all reads complete. See `problem.py:288-298`.
+</Note>
+
+### Example
+
+```python
+# Store results back to memory
+instruction = {
+    "store": [
+        ("store", 0, 10)  # mem[scratch[0]] = scratch[10]
+    ]
+}
+```
+
+## FLOW Engine
+
+Controls program flow, conditional operations, and core state.
+
+### Operations
+
+| Operation | Format | Description |
+|-----------|--------|-------------|
+| `select` | `("select", dest, cond, a, b)` | Conditional: `dest = a if cond != 0 else b` |
+| `add_imm` | `("add_imm", dest, a, imm)` | Add immediate: `dest = a + imm` |
+| `vselect` | `("vselect", dest, cond, a, b)` | Vector select: `dest[i] = a[i] if cond[i] != 0 else b[i]` |
+| `halt` | `("halt",)` | Stop core execution |
+| `pause` | `("pause",)` | Pause core (for debugging) |
+| `trace_write` | `("trace_write", val)` | Write value to trace buffer |
+| `jump` | `("jump", addr)` | Unconditional jump: `pc = addr` |
+| `jump_indirect` | `("jump_indirect", addr)` | Indirect jump: `pc = scratch[addr]` |
+| `cond_jump` | `("cond_jump", cond, addr)` | Conditional jump: `pc = addr if scratch[cond] != 0` |
+| `cond_jump_rel` | `("cond_jump_rel", cond, offset)` | Relative conditional jump: `pc += offset if scratch[cond] != 0` |
+| `coreid` | `("coreid", dest)` | Get core ID: `dest = core.id` |
+
+<Note>
+The flow engine has only **1 slot** - only one flow operation can execute per cycle. Jump instructions take effect immediately. See `problem.py:300-335`.
+</Note>
+
+### Example
+
+```python
+# Conditional loop control
+instruction = {
+    "alu": [
+        ("<", 50, 0, 1)  # scratch[50] = 1 if scratch[0] < scratch[1]
+    ],
+    "flow": [
+        ("cond_jump_rel", 50, -5)  # Jump back 5 instructions if condition met
+    ]
+}
+```
+
+## DEBUG Engine
+
+Debugging and assertion operations (not counted as cycles).
+
+### Operations
+
+| Operation | Format | Description |
+|-----------|--------|-------------|
+| `compare` | `("compare", loc, key)` | Assert `scratch[loc] == value_trace[key]` |
+| `vcompare` | `("vcompare", loc, keys)` | Assert vector matches expected values |
+| `comment` | Any other format | Ignored (for documentation) |
+
+<Note>
+Debug instructions don't consume cycles and can be disabled with `enable_debug=False`. See `problem.py:366-382`.
+</Note>
+
+### Example
+
+```python
+# Verify intermediate results
+instruction = {
+    "debug": [
+        ("compare", 10, "expected_sum"),
+        ("vcompare", 100, ["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"])
+    ]
+}
+```
+
+## Engine Execution Model
+
+<Steps>
+  <Step title="Read Phase">
+    All engines read their operands from scratch and memory simultaneously.
+  </Step>
+  
+  <Step title="Execute Phase">
+    All engines execute their operations in parallel within their slot limits.
+  </Step>
+  
+  <Step title="Write Phase">
+    All writes to scratch and memory take effect at the end of the cycle.
+  </Step>
+</Steps>
+
+<Warning>
+Because writes happen at the end of the cycle, reading and writing the same address in one instruction will read the **old** value, not the newly written one.
+</Warning>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Instruction Format" icon="code" href="/api/instruction-format">
+    Learn how to construct instruction bundles
+  </Card>
+  <Card title="Architecture Overview" icon="microchip" href="/architecture/vliw-simd">
+    Understand the VLIW SIMD architecture
+  </Card>
+</CardGroup>

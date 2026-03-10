@@ -1,0 +1,330 @@
+---
+title: 'Instruction Format'
+description: 'Structure and formatting of VLIW instruction bundles'
+---
+
+## Type Definitions
+
+Instructions are defined using Python type hints in `problem.py`:
+
+```python
+Engine = Literal["alu", "load", "store", "flow"]
+Instruction = dict[Engine, list[tuple]]
+```
+
+<Note>
+From `problem.py:14-15` - An instruction is a dictionary mapping engine names to lists of operation tuples.
+</Note>
+
+## Instruction Structure
+
+Each instruction is a **VLIW (Very Large Instruction Word)** bundle that specifies operations for multiple engines:
+
+```python
+instruction: Instruction = {
+    "engine_name": [
+        (operation, operand1, operand2, ...),
+        (operation, operand1, operand2, ...),
+    ],
+    "another_engine": [
+        (operation, operand1, operand2, ...),
+    ]
+}
+```
+
+### Key Principles
+
+<AccordionGroup>
+  <Accordion title="Parallel Execution">
+    All operations within an instruction execute **in parallel** during a single cycle. Each engine processes all its slots simultaneously.
+  </Accordion>
+  
+  <Accordion title="Slot Limits">
+    Each engine has a maximum number of operations it can execute per cycle:
+    - ALU: 12 slots
+    - VALU: 6 slots  
+    - LOAD: 2 slots
+    - STORE: 2 slots
+    - FLOW: 1 slot
+    - DEBUG: 64 slots (doesn't count as a cycle)
+  </Accordion>
+  
+  <Accordion title="End-of-Cycle Semantics">
+    All writes take effect at the **end of the cycle** after all reads complete. This means you can safely read and write the same location in one instruction - the read sees the old value.
+  </Accordion>
+</AccordionGroup>
+
+## Operand Format
+
+<Warning>
+**Critical Rule**: Almost every number in an instruction is a **scratch address**, not a value.
+</Warning>
+
+### Scratch Addresses
+
+Most operands reference locations in scratch memory:
+
+```python
+{
+    "alu": [
+        ("+", 10, 5, 6)  # scratch[10] = scratch[5] + scratch[6]
+    ]
+}
+```
+
+### Exceptions
+
+| Operation | Exception | Description |
+|-----------|-----------|-------------|
+| `const` | Second operand is immediate | `("const", dest, 42)` - dest gets value 42 |
+| `add_imm` | Third operand is immediate | `("add_imm", dest, src, 5)` - adds 5 to src |
+| `jump` | Operand is instruction index | `("jump", 10)` - jumps to instruction 10 |
+| `cond_jump` | Second operand is instruction index | `("cond_jump", cond, 10)` |
+| `cond_jump_rel` | Second operand is offset | `("cond_jump_rel", cond, -5)` - jumps back 5 instructions |
+| `store` | First operand is indirect | `("store", addr, src)` - stores to `mem[scratch[addr]]` |
+
+<Note>
+From `problem.py:86-94` - The machine documentation states: "In general every number in an instruction is a scratch address except for const and jump, and except for store and some flow instructions the first operand is the destination."
+</Note>
+
+## Destination Convention
+
+**For most operations, the first operand is the destination:**
+
+```python
+("+", dest, a, b)      # dest = a + b
+("load", dest, addr)   # dest = mem[addr]
+("select", dest, c, a, b)  # dest = a if c else b
+```
+
+**Exceptions:**
+
+```python
+("store", addr, src)   # mem[addr] = src (src is second)
+("cond_jump", cond, addr)  # Jumps to addr if cond (no destination)
+```
+
+## Vector Operations
+
+Vector operations work on **8 contiguous scratch addresses** (`VLEN=8`):
+
+```python
+{
+    "valu": [
+        ("vbroadcast", 100, 50),  # scratch[100:108] = scratch[50]
+        ("+", 200, 100, 110)      # scratch[200+i] = scratch[100+i] + scratch[110+i] for i in 0..7
+    ]
+}
+```
+
+<Note>
+When you specify address 100 for a vector operation, it operates on addresses 100, 101, 102, 103, 104, 105, 106, 107.
+</Note>
+
+## Example Instruction Bundles
+
+### Simple Arithmetic
+
+```python
+# Compute: z = (x + y) * 2
+{
+    "load": [
+        ("const", 2, 2)      # scratch[2] = 2
+    ],
+    "alu": [
+        ("+", 3, 0, 1),      # scratch[3] = scratch[0] + scratch[1]
+        ("*", 4, 3, 2)       # scratch[4] = scratch[3] * scratch[2]
+    ]
+}
+```
+
+### Memory Operations
+
+```python
+# Load from memory, process, and store back
+{
+    "load": [
+        ("load", 10, 0),     # scratch[10] = mem[scratch[0]]
+        ("load", 11, 1)      # scratch[11] = mem[scratch[1]]
+    ],
+    "alu": [
+        ("+", 12, 10, 11)    # scratch[12] = scratch[10] + scratch[11]
+    ],
+    "store": [
+        ("store", 2, 12)     # mem[scratch[2]] = scratch[12]
+    ]
+}
+```
+
+### Vector Processing
+
+```python
+# Vector multiply-add: result[i] = a[i] * b[i] + c[i]
+{
+    "load": [
+        ("vload", 100, 50),  # Load 8 words from mem[scratch[50]:scratch[50]+8]
+        ("vload", 110, 51)   # Load 8 words from mem[scratch[51]:scratch[51]+8]
+    ],
+    "valu": [
+        ("vbroadcast", 120, 52),           # Broadcast scalar to vector
+        ("multiply_add", 200, 100, 110, 120)  # Fused multiply-add
+    ]
+}
+```
+
+### Conditional Execution
+
+```python
+# If x < y then z = x else z = y
+{
+    "alu": [
+        ("<", 10, 0, 1)      # scratch[10] = 1 if scratch[0] < scratch[1]
+    ],
+    "flow": [
+        ("select", 2, 10, 0, 1)  # scratch[2] = scratch[0] if scratch[10] else scratch[1]
+    ]
+}
+```
+
+### Loop Control
+
+```python
+# Loop: for i in range(n)
+# Assuming scratch[0] = i, scratch[1] = n, scratch[2] = 1
+{
+    "alu": [
+        ("+", 0, 0, 2),      # i++
+        ("<", 10, 0, 1)      # scratch[10] = (i < n)
+    ],
+    "flow": [
+        ("cond_jump_rel", 10, -3)  # Jump back 3 instructions if i < n
+    ]
+}
+```
+
+## VLIW Packing Strategy
+
+<Steps>
+  <Step title="Identify Independent Operations">
+    Find operations that don't depend on each other's results.
+  </Step>
+  
+  <Step title="Group by Engine">
+    Organize operations by which engine executes them.
+  </Step>
+  
+  <Step title="Pack Within Slot Limits">
+    Combine up to the slot limit for each engine in a single instruction.
+  </Step>
+  
+  <Step title="Handle Dependencies">
+    Operations that depend on previous results must go in a later instruction.
+  </Step>
+</Steps>
+
+### Packing Example
+
+**Poor packing** (4 cycles):
+
+```python
+[
+    {"alu": [("*", 10, 0, 1)]},
+    {"alu": [("*", 11, 2, 3)]},
+    {"alu": [("*", 12, 4, 5)]},
+    {"alu": [("*", 13, 6, 7)]}
+]
+```
+
+**Good packing** (1 cycle):
+
+```python
+[
+    {
+        "alu": [
+            ("*", 10, 0, 1),
+            ("*", 11, 2, 3),
+            ("*", 12, 4, 5),
+            ("*", 13, 6, 7)
+        ]
+    }
+]
+```
+
+### Dependency Example
+
+**Must use 2 cycles** (second operation depends on first):
+
+```python
+[
+    {
+        "alu": [("*", 10, 0, 1)]  # Compute product
+    },
+    {
+        "alu": [("+", 11, 10, 2)]  # Use product (depends on previous)
+    }
+]
+```
+
+<Warning>
+You **cannot** pack dependent operations into the same instruction because writes only take effect at the end of the cycle.
+</Warning>
+
+## Real-World Example from build_kernel
+
+Here's a typical instruction from the hash computation:
+
+```python
+# XOR with constant and compute shifts
+{
+    "load": [
+        ("const", 50, 0xC761C23C)  # Load constant
+    ],
+    "alu": [
+        ("^", 10, 5, 50),          # XOR with constant
+        ("<<", 11, 10, 51),        # Left shift
+        (">>", 12, 10, 52)         # Right shift (uses same source)
+    ],
+    "flow": [
+        ("select", 13, 11, 12)     # Select based on condition
+    ]
+}
+```
+
+<Note>
+This example shows **VLIW packing**: multiple independent operations (load constant, XOR, two shifts) execute in parallel in a single cycle.
+</Note>
+
+## Debugging Instructions
+
+<Tip>
+Use debug instructions to verify intermediate values during development:
+
+```python
+{
+    "alu": [("*", 10, 5, 6)],
+    "debug": [
+        ("compare", 10, "expected_product"),
+        ("comment", "Multiply x by y")
+    ]
+}
+```
+
+Debug instructions don't consume cycles and can be disabled in production.
+</Tip>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Engine Reference" icon="gear" href="/api/engines">
+    Detailed operation reference for each engine
+  </Card>
+  <Card title="Architecture Guide" icon="book" href="/architecture/vliw-simd">
+    Understanding VLIW and SIMD concepts
+  </Card>
+  <Card title="Writing Kernels" icon="code" href="/kernel/kernel-builder">
+    How to write efficient kernel code
+  </Card>
+  <Card title="Machine Class" icon="computer" href="/api/machine">
+    Machine simulator implementation
+  </Card>
+</CardGroup>

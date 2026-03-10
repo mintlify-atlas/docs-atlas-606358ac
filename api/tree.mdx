@@ -1,0 +1,280 @@
+---
+title: 'Tree'
+description: 'Binary tree data structure for the traversal challenge'
+icon: 'tree'
+---
+
+<Note>
+The Tree class represents a perfect balanced binary tree with random values on each node. It's the primary data structure traversed in the performance challenge.
+</Note>
+
+## Dataclass: Tree
+
+An implicit perfect balanced binary tree stored as a flat array of node values.
+
+```python problem.py:405-418
+@dataclass
+class Tree:
+    """
+    An implicit perfect balanced binary tree with values on the nodes.
+    """
+
+    height: int
+    values: list[int]
+
+    @staticmethod
+    def generate(height: int):
+        n_nodes = 2 ** (height + 1) - 1
+        values = [random.randint(0, 2**30 - 1) for _ in range(n_nodes)]
+        return Tree(height, values)
+```
+
+---
+
+## Fields
+
+<ParamField path="height" type="int" required>
+  Height of the tree. A tree of height `h` has `2^(h+1) - 1` nodes.
+  
+  - Height 0: 1 node (just root)
+  - Height 1: 3 nodes (root + 2 children)
+  - Height 10: 2047 nodes (typical test size)
+</ParamField>
+
+<ParamField path="values" type="list[int]" required>
+  Array of 32-bit node values stored in breadth-first order.
+  
+  Index 0 is the root. For node at index `i`:
+  - Left child: `2*i + 1`
+  - Right child: `2*i + 2`
+  - Parent: `(i-1) // 2`
+</ParamField>
+
+---
+
+## Methods
+
+### generate()
+
+Generates a random tree with the specified height.
+
+<ParamField path="height" type="int" required>
+  Height of the tree to generate
+</ParamField>
+
+<ResponseField name="return" type="Tree">
+  A new Tree with random 30-bit values
+</ResponseField>
+
+```python problem.py:414-418
+@staticmethod
+def generate(height: int):
+    n_nodes = 2 ** (height + 1) - 1
+    values = [random.randint(0, 2**30 - 1) for _ in range(n_nodes)]
+    return Tree(height, values)
+```
+
+**Example:**
+```python
+import random
+from problem import Tree
+
+random.seed(123)
+tree = Tree.generate(height=4)
+
+print(f"Height: {tree.height}")
+print(f"Nodes: {len(tree.values)}")
+print(f"Root value: {tree.values[0]}")
+print(f"Left child: {tree.values[1]}")
+print(f"Right child: {tree.values[2]}")
+```
+
+**Output:**
+```
+Height: 4
+Nodes: 31
+Root value: 870398137
+Left child: 926108597
+Right child: 184120052
+```
+
+---
+
+## Tree Structure
+
+The tree is stored implicitly as an array using breadth-first ordering:
+
+```
+           [0]
+          /   \
+       [1]     [2]
+       / \     / \
+     [3] [4] [5] [6]
+     ...
+```
+
+**Navigation formulas:**
+- Left child of node `i`: `2*i + 1`
+- Right child of node `i`: `2*i + 2`  
+- Parent of node `i`: `(i - 1) // 2`
+- Check if valid: `i < len(values)`
+
+---
+
+## Role in the Challenge
+
+The Tree is used in the parallel tree traversal kernel:
+
+1. **Each batch item** starts at index 0 (root)
+2. **At each step:**
+   - Read the node value at current index
+   - XOR with the input value
+   - Hash the result
+   - Choose left child (index `2*i+1`) if hash is even, right child (`2*i+2`) if odd
+   - Wrap to root if index exceeds tree bounds
+3. **Repeat** for multiple rounds
+
+```python problem.py:467-484
+def reference_kernel(t: Tree, inp: Input):
+    """
+    Reference implementation of the kernel.
+
+    A parallel tree traversal where at each node we set
+    cur_inp_val = myhash(cur_inp_val ^ node_val)
+    and then choose the left branch if cur_inp_val is even.
+    If we reach the bottom of the tree we wrap around to the top.
+    """
+    for h in range(inp.rounds):
+        for i in range(len(inp.indices)):
+            idx = inp.indices[i]
+            val = inp.values[i]
+            val = myhash(val ^ t.values[idx])
+            idx = 2 * idx + (1 if val % 2 == 0 else 2)
+            idx = 0 if idx >= len(t.values) else idx
+            inp.values[i] = val
+            inp.indices[i] = idx
+```
+
+---
+
+## Memory Layout
+
+When passed to the simulator, the tree is stored in memory using `build_mem_image()`:
+
+```python problem.py:487-513
+def build_mem_image(t: Tree, inp: Input) -> list[int]:
+    """
+    Build a flat memory image of the problem.
+    """
+    header = 7
+    mem = [0] * (header + len(t.values) + len(inp.indices) + len(inp.values) + extra_room)
+    
+    forest_values_p = header
+    inp_indices_p = forest_values_p + len(t.values)
+    inp_values_p = inp_indices_p + len(inp.values)
+    
+    # Header
+    mem[0] = inp.rounds
+    mem[1] = len(t.values)      # n_nodes
+    mem[2] = len(inp.indices)   # batch_size
+    mem[3] = t.height           # forest_height
+    mem[4] = forest_values_p    # pointer to tree values
+    mem[5] = inp_indices_p      # pointer to input indices
+    mem[6] = inp_values_p       # pointer to input values
+    
+    # Data
+    mem[header:inp_indices_p] = t.values
+    mem[inp_indices_p:inp_values_p] = inp.indices
+    mem[inp_values_p:] = inp.values
+    return mem
+```
+
+**Memory map:**
+```
+Address 0-6:    Header (rounds, n_nodes, batch_size, height, pointers)
+Address 7+:     Tree values (contiguous array)
+Next section:   Input indices
+Next section:   Input values
+```
+
+---
+
+## Performance Considerations
+
+<Card title="Memory Access Pattern" icon="memory">
+  Tree nodes are accessed pseudo-randomly based on hash values. This creates irregular memory access patterns that are challenging to optimize.
+</Card>
+
+<Card title="Tree Size" icon="ruler">
+  The test uses height=10, which gives 2047 nodes (8188 bytes). This fits comfortably in L1 cache on modern processors.
+</Card>
+
+<Card title="Read-Only Data" icon="lock">
+  Tree values are never modified during execution - only input indices and values change. Consider this when designing your memory access strategy.
+</Card>
+
+---
+
+## Example: Tree Traversal
+
+```python
+import random
+from problem import Tree, myhash
+
+# Create small tree
+random.seed(42)
+tree = Tree.generate(height=2)  # 7 nodes
+
+print("Tree structure (indices):")
+print("       0")
+print("      / \\")
+print("     1   2")
+print("    / \\ / \\")
+print("   3  4 5  6")
+print()
+print("Tree values:", tree.values)
+print()
+
+# Simulate one traversal step
+idx = 0  # Start at root
+val = 12345
+
+print(f"Starting at node {idx} with value {val}")
+node_val = tree.values[idx]
+print(f"Node value: {node_val}")
+
+val = myhash(val ^ node_val)
+print(f"After hash: {val}")
+
+if val % 2 == 0:
+    next_idx = 2 * idx + 1  # Left child
+    print(f"Hash is even -> go left to node {next_idx}")
+else:
+    next_idx = 2 * idx + 2  # Right child
+    print(f"Hash is odd -> go right to node {next_idx}")
+
+if next_idx >= len(tree.values):
+    next_idx = 0
+    print(f"Out of bounds -> wrap to root (node {next_idx})")
+```
+
+---
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Input" icon="inbox" href="/api/input">
+    Batch input data that traverses the tree
+  </Card>
+  <Card title="KernelBuilder" icon="hammer" href="/api/kernel-builder">
+    Build kernels that operate on trees
+  </Card>
+  <Card title="Machine" icon="microchip" href="/api/machine">
+    Simulator that executes tree traversal
+  </Card>
+</CardGroup>
+
+<div style={{backgroundColor: "#CA8A67", padding: "12px", borderRadius: "6px", marginTop: "16px"}}>
+  <strong style={{color: "white"}}>Understanding Tree Layout</strong>
+  <p style={{color: "white", margin: "4px 0 0 0", fontSize: "14px"}}>The implicit array representation means no pointers - just index arithmetic. This makes it cache-friendly and perfect for SIMD operations if you can process multiple indices in parallel.</p>
+</div>

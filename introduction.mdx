@@ -1,0 +1,118 @@
+---
+title: "Introduction"
+description: "Anthropic's original performance take-home challenge - optimize a custom VLIW SIMD kernel"
+---
+
+## Welcome to the Performance Challenge
+
+This is Anthropic's original performance engineering take-home, now open for you to try! The challenge features a custom VLIW (Very Large Instruction Word) SIMD architecture simulator where you optimize a kernel that performs parallel tree traversal with hashing operations.
+
+<Note>
+This repo contains the original 4-hour take-home baseline. After Claude Opus 4.5 started beating humans at the 2-hour version, Anthropic moved to different baselines for time-limited assessments.
+</Note>
+
+## Beat Claude Opus 4.5
+
+Now you can compete against Claude's best performance with unlimited time:
+
+- **2164 cycles**: Claude Opus 4 after many hours
+- **1790 cycles**: Claude Opus 4.5 in casual session (matches best human 2-hour performance)
+- **1579 cycles**: Claude Opus 4.5 after 2 hours
+- **1487 cycles**: Claude Opus 4.5 after 11.5 hours
+- **1363 cycles**: Claude Opus 4.5 in improved harness
+
+If you optimize below **1487 cycles**, email your code to `performance-recruiting@anthropic.com` - Anthropic wants to be impressed!
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="VLIW SIMD Simulator" icon="microchip">
+    Custom architecture with multiple execution engines and vector operations
+  </Card>
+  <Card title="Performance Tiers" icon="trophy">
+    Multiple benchmark levels from baseline to world-class optimization
+  </Card>
+  <Card title="Perfetto Tracing" icon="chart-line">
+    Hot-reloading trace visualization for debugging instruction execution
+  </Card>
+  <Card title="Frozen Test Harness" icon="lock">
+    Immutable test suite ensures fair performance comparison
+  </Card>
+</CardGroup>
+
+## The Challenge
+
+The task is to optimize `KernelBuilder.build_kernel()` to minimize cycle count on a simulated VLIW SIMD machine. The kernel performs:
+
+1. **Tree traversal**: Navigate a binary tree based on input values
+2. **Hashing**: Apply a multi-stage 32-bit hash function
+3. **Branch selection**: Choose left or right child based on hash parity
+4. **Wrapping**: Handle out-of-bounds indices
+
+The baseline implementation uses scalar operations. You can exploit:
+
+- **VLIW parallelism**: Pack multiple operations into instruction slots
+- **SIMD vectorization**: Process multiple elements with vector instructions
+- **Memory optimization**: Smart use of scratch space and memory layout
+- **Instruction scheduling**: Minimize pipeline stalls and dependencies
+
+## Quick Start
+
+<Steps>
+  <Step title="Get the code">
+    Clone the repository from GitHub:
+    ```bash
+    git clone https://github.com/anthropics/original_performance_takehome.git
+    cd original_performance_takehome
+    ```
+  </Step>
+  
+  <Step title="Run the baseline">
+    Test the unoptimized kernel:
+    ```bash
+    python perf_takehome.py Tests.test_kernel_cycles
+    ```
+    
+    Expected output: **147734 cycles** (baseline)
+  </Step>
+  
+  <Step title="Validate your optimization">
+    After making changes, verify correctness and check your cycle count:
+    ```bash
+    python tests/submission_tests.py
+    ```
+  </Step>
+</Steps>
+
+## What's Next?
+
+<CardGroup cols={2}>
+  <Card title="Understand the Task" icon="bullseye" href="/challenge/task">
+    Learn what you need to optimize and the rules
+  </Card>
+  <Card title="Architecture Overview" icon="building" href="/architecture/simulator">
+    Deep dive into the VLIW SIMD simulator design
+  </Card>
+  <Card title="Kernel Builder API" icon="code" href="/api/kernel-builder">
+    Reference for building optimized kernels
+  </Card>
+  <Card title="Debugging Tools" icon="bug" href="/debugging/trace-visualization">
+    Learn to use Perfetto trace visualization
+  </Card>
+</CardGroup>
+
+## Warning: Don't Cheat
+
+<Warning>
+LLMs have been known to modify tests to make the problem easier. **Do not modify the `tests/` folder.** Always validate with:
+
+```bash
+# Verify tests are unchanged
+git diff origin/main tests/
+
+# Run submission tests
+python tests/submission_tests.py
+```
+</Warning>
+
+The challenge is designed to test real optimization skills, not test manipulation!

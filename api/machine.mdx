@@ -1,0 +1,568 @@
+---
+title: 'Machine'
+description: 'Simulator for the custom VLIW SIMD architecture'
+icon: 'microchip'
+---
+
+<Note>
+The Machine class simulates a custom Very Large Instruction Word (VLIW) architecture with SIMD capabilities. It executes programs built by KernelBuilder and provides tracing and debugging features.
+</Note>
+
+## Class: Machine
+
+A cycle-accurate simulator for a custom VLIW SIMD processor with multiple execution engines.
+
+### Architecture Overview
+
+**VLIW (Very Large Instruction Word):**
+- Multiple execution engines operate in parallel each cycle
+- Each engine can execute multiple "slots" per cycle
+- Slot limits defined in `SLOT_LIMITS`:
+  - `alu`: 12 slots (scalar arithmetic/logic)
+  - `valu`: 6 slots (vector arithmetic/logic)
+  - `load`: 2 slots (memory reads)
+  - `store`: 2 slots (memory writes)
+  - `flow`: 1 slot (control flow)
+  - `debug`: 64 slots (debug operations)
+
+**SIMD (Single Instruction, Multiple Data):**
+- Vector operations process `VLEN=8` elements simultaneously
+- Vector instructions: `vload`, `vstore`, `valu`, `vselect`, `vbroadcast`
+- Vectors occupy consecutive scratch addresses
+
+**Memory Model:**
+- 32-bit word addressable memory
+- Scratch space acts as registers (1536 words by default)
+- All writes take effect at end of cycle (no intra-cycle dependencies)
+
+---
+
+## Constructor
+
+```python
+machine = Machine(
+    mem_dump,
+    program,
+    debug_info,
+    n_cores=1,
+    scratch_size=1536,
+    trace=False,
+    value_trace={}
+)
+```
+
+<ParamField path="mem_dump" type="list[int]" required>
+  Initial memory contents (32-bit words)
+</ParamField>
+
+<ParamField path="program" type="list[Instruction]" required>
+  List of instruction bundles to execute. Each instruction is a dict mapping engine names to lists of slots.
+</ParamField>
+
+<ParamField path="debug_info" type="DebugInfo" required>
+  Debug information from KernelBuilder (scratch variable names)
+</ParamField>
+
+<ParamField path="n_cores" type="int" default="1">
+  Number of processor cores (current version uses 1)
+</ParamField>
+
+<ParamField path="scratch_size" type="int" default="1536">
+  Size of scratch space per core in 32-bit words
+</ParamField>
+
+<ParamField path="trace" type="bool" default="False">
+  Enable Perfetto trace generation for visualization
+</ParamField>
+
+<ParamField path="value_trace" type="dict[Any, int]" default="{}">
+  Dictionary for debug value tracking (used by debug engine)
+</ParamField>
+
+```python problem.py:97-122
+def __init__(
+    self,
+    mem_dump: list[int],
+    program: list[Instruction],
+    debug_info: DebugInfo,
+    n_cores: int = 1,
+    scratch_size: int = SCRATCH_SIZE,
+    trace: bool = False,
+    value_trace: dict[Any, int] = {},
+):
+    self.cores = [
+        Core(id=i, scratch=[0] * scratch_size, trace_buf=[]) for i in range(n_cores)
+    ]
+    self.mem = copy(mem_dump)
+    self.program = program
+    self.debug_info = debug_info
+    self.value_trace = value_trace
+    self.prints = False
+    self.cycle = 0
+    self.enable_pause = True
+    self.enable_debug = True
+    if trace:
+        self.setup_trace()
+    else:
+        self.trace = None
+```
+
+---
+
+## Execution Methods
+
+### run()
+
+Executes the program until all cores halt or pause.
+
+```python problem.py:197-217
+def run(self):
+    for core in self.cores:
+        if core.state == CoreState.PAUSED:
+            core.state = CoreState.RUNNING
+    while any(c.state == CoreState.RUNNING for c in self.cores):
+        has_non_debug = False
+        for core in self.cores:
+            if core.state != CoreState.RUNNING:
+                continue
+            if core.pc >= len(self.program):
+                core.state = CoreState.STOPPED
+                continue
+            instr = self.program[core.pc]
+            if self.prints:
+                self.print_step(instr, core)
+            core.pc += 1
+            self.step(instr, core)
+            if any(name != "debug" for name in instr.keys()):
+                has_non_debug = True
+        if has_non_debug:
+            self.cycle += 1
+```
+
+<Note>
+The cycle counter only increments for instructions with non-debug operations. This is what the performance test measures.
+</Note>
+
+---
+
+### step()
+
+Executes a single instruction bundle across all engines.
+
+<ParamField path="instr" type="Instruction" required>
+  Instruction bundle (dict mapping engines to slot lists)
+</ParamField>
+
+<ParamField path="core" type="Core" required>
+  Core to execute on
+</ParamField>
+
+```python problem.py:352-397
+def step(self, instr: Instruction, core):
+    """
+    Execute all the slots in each engine for a single instruction bundle
+    """
+    ENGINE_FNS = {
+        "alu": self.alu,
+        "valu": self.valu,
+        "load": self.load,
+        "store": self.store,
+        "flow": self.flow,
+    }
+    self.scratch_write = {}
+    self.mem_write = {}
+    for name, slots in instr.items():
+        if name == "debug":
+            if not self.enable_debug:
+                continue
+            for slot in slots:
+                if slot[0] == "compare":
+                    loc, key = slot[1], slot[2]
+                    ref = self.value_trace[key]
+                    res = core.scratch[loc]
+                    assert res == ref, f"{res} != {ref} for {key} at pc={core.pc}"
+                elif slot[0] == "vcompare":
+                    loc, keys = slot[1], slot[2]
+                    ref = [self.value_trace[key] for key in keys]
+                    res = core.scratch[loc : loc + VLEN]
+                    assert res == ref, (
+                        f"{res} != {ref} for {keys} at pc={core.pc} loc={loc}"
+                    )
+            continue
+        assert len(slots) <= SLOT_LIMITS[name]
+        for i, slot in enumerate(slots):
+            if self.trace is not None:
+                self.trace_slot(core, slot, name, i)
+            ENGINE_FNS[name](core, *slot)
+    for addr, val in self.scratch_write.items():
+        core.scratch[addr] = val
+    for addr, val in self.mem_write.items():
+        self.mem[addr] = val
+
+    if self.trace:
+        self.trace_post_step(instr, core)
+
+    del self.scratch_write
+    del self.mem_write
+```
+
+<Warning>
+All writes (scratch and memory) take effect at the end of the cycle. Reading and writing the same location in one instruction uses the old value.
+</Warning>
+
+---
+
+### setup_trace()
+
+Initializes Perfetto trace generation for visualization.
+
+```python problem.py:151-196
+def setup_trace(self):
+    """
+    The simulator generates traces in Chrome's Trace Event Format for
+    visualization in Perfetto (or chrome://tracing if you prefer it). See
+    the bottom of the file for info about how to use this.
+
+    See the format docs in case you want to add more info to the trace:
+    https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview
+    """
+    self.trace = open("trace.json", "w")
+    self.trace.write("[")
+    # ... trace initialization code ...
+```
+
+<Tip>
+Run `python perf_takehome.py Tests.test_kernel_trace` then `python watch_trace.py` to view execution traces in Perfetto. This is the recommended debugging workflow.
+</Tip>
+
+---
+
+## Engine Methods
+
+Each execution engine implements specific operations. All addresses refer to scratch space unless otherwise noted.
+
+### alu()
+
+Scalar arithmetic and logic operations.
+
+<ParamField path="core" type="Core" required>
+  Core executing the operation
+</ParamField>
+
+<ParamField path="op" type="str" required>
+  Operation: `+`, `-`, `*`, `//`, `cdiv`, `^`, `&`, `|`, `<<`, `>>`, `%`, `<`, `==`
+</ParamField>
+
+<ParamField path="dest" type="int" required>
+  Destination scratch address
+</ParamField>
+
+<ParamField path="a1" type="int" required>
+  First operand scratch address
+</ParamField>
+
+<ParamField path="a2" type="int" required>
+  Second operand scratch address
+</ParamField>
+
+```python problem.py:219-252
+def alu(self, core, op, dest, a1, a2):
+    a1 = core.scratch[a1]
+    a2 = core.scratch[a2]
+    match op:
+        case "+":
+            res = a1 + a2
+        case "-":
+            res = a1 - a2
+        case "*":
+            res = a1 * a2
+        case "//":
+            res = a1 // a2
+        case "cdiv":
+            res = cdiv(a1, a2)
+        case "^":
+            res = a1 ^ a2
+        case "&":
+            res = a1 & a2
+        case "|":
+            res = a1 | a2
+        case "<<":
+            res = a1 << a2
+        case ">>":
+            res = a1 >> a2
+        case "%":
+            res = a1 % a2
+        case "<":
+            res = int(a1 < a2)
+        case "==":
+            res = int(a1 == a2)
+        case _:
+            raise NotImplementedError(f"Unknown alu op {op}")
+    res = res % (2**32)
+    self.scratch_write[dest] = res
+```
+
+**Example:**
+```python
+{"alu": [("*", 2, 0, 1), ("+", 3, 2, 0)]}  # scratch[2] = scratch[0] * scratch[1]
+                                             # scratch[3] = scratch[2] + scratch[0]
+```
+
+---
+
+### valu()
+
+Vector arithmetic and logic operations (operates on VLEN=8 elements).
+
+<ParamField path="core" type="Core" required>
+  Core executing the operation
+</ParamField>
+
+<ParamField path="slot" type="tuple" required>
+  Vector operation slot
+</ParamField>
+
+**Supported operations:**
+- `("vbroadcast", dest, src)`: Broadcast scalar to vector
+- `("multiply_add", dest, a, b, c)`: `dest[i] = a[i] * b[i] + c[i]`
+- `(op, dest, a, b)`: Element-wise ALU operation
+
+```python problem.py:254-267
+def valu(self, core, *slot):
+    match slot:
+        case ("vbroadcast", dest, src):
+            for i in range(VLEN):
+                self.scratch_write[dest + i] = core.scratch[src]
+        case ("multiply_add", dest, a, b, c):
+            for i in range(VLEN):
+                mul = (core.scratch[a + i] * core.scratch[b + i]) % (2**32)
+                self.scratch_write[dest + i] = (mul + core.scratch[c + i]) % (2**32)
+        case (op, dest, a1, a2):
+            for i in range(VLEN):
+                self.alu(core, op, dest + i, a1 + i, a2 + i)
+        case _:
+            raise NotImplementedError(f"Unknown valu op {slot}")
+```
+
+**Example:**
+```python
+{"valu": [("vbroadcast", 8, 0), ("*", 16, 8, 24)]}  # Broadcast scratch[0] to scratch[8:16]
+                                                      # scratch[16:24] = scratch[8:16] * scratch[24:32]
+```
+
+---
+
+### load()
+
+Memory and constant loading operations.
+
+**Supported operations:**
+- `("load", dest, addr)`: `scratch[dest] = mem[scratch[addr]]`
+- `("load_offset", dest, addr, offset)`: `scratch[dest+offset] = mem[scratch[addr+offset]]`
+- `("vload", dest, addr)`: Load 8 contiguous words
+- `("const", dest, val)`: `scratch[dest] = val`
+
+```python problem.py:269-286
+def load(self, core, *slot):
+    match slot:
+        case ("load", dest, addr):
+            self.scratch_write[dest] = self.mem[core.scratch[addr]]
+        case ("load_offset", dest, addr, offset):
+            self.scratch_write[dest + offset] = self.mem[
+                core.scratch[addr + offset]
+            ]
+        case ("vload", dest, addr):  # addr is a scalar
+            addr = core.scratch[addr]
+            for vi in range(VLEN):
+                self.scratch_write[dest + vi] = self.mem[addr + vi]
+        case ("const", dest, val):
+            self.scratch_write[dest] = (val) % (2**32)
+        case _:
+            raise NotImplementedError(f"Unknown load op {slot}")
+```
+
+---
+
+### store()
+
+Memory write operations.
+
+**Supported operations:**
+- `("store", addr, src)`: `mem[scratch[addr]] = scratch[src]`
+- `("vstore", addr, src)`: Store 8 contiguous words
+
+```python problem.py:288-298
+def store(self, core, *slot):
+    match slot:
+        case ("store", addr, src):
+            addr = core.scratch[addr]
+            self.mem_write[addr] = core.scratch[src]
+        case ("vstore", addr, src):  # addr is a scalar
+            addr = core.scratch[addr]
+            for vi in range(VLEN):
+                self.mem_write[addr + vi] = core.scratch[src + vi]
+        case _:
+            raise NotImplementedError(f"Unknown store op {slot}")
+```
+
+---
+
+### flow()
+
+Control flow and special operations.
+
+**Supported operations:**
+- `("select", dest, cond, a, b)`: `dest = a if cond != 0 else b`
+- `("vselect", dest, cond, a, b)`: Vector select
+- `("add_imm", dest, a, imm)`: `dest = a + imm` (immediate)
+- `("halt",)`: Stop execution
+- `("pause",)`: Pause until next `run()` call
+- `("jump", addr)`: Jump to instruction address
+- `("cond_jump", cond, addr)`: Conditional jump
+- `("cond_jump_rel", cond, offset)`: Relative conditional jump
+- `("jump_indirect", addr)`: `pc = scratch[addr]`
+- `("coreid", dest)`: `dest = core.id`
+- `("trace_write", val)`: Append to trace buffer
+
+```python problem.py:300-335
+def flow(self, core, *slot):
+    match slot:
+        case ("select", dest, cond, a, b):
+            self.scratch_write[dest] = (
+                core.scratch[a] if core.scratch[cond] != 0 else core.scratch[b]
+            )
+        case ("add_imm", dest, a, imm):
+            self.scratch_write[dest] = (core.scratch[a] + imm) % (2**32)
+        case ("vselect", dest, cond, a, b):
+            for vi in range(VLEN):
+                self.scratch_write[dest + vi] = (
+                    core.scratch[a + vi]
+                    if core.scratch[cond + vi] != 0
+                    else core.scratch[b + vi]
+                )
+        case ("halt",):
+            core.state = CoreState.STOPPED
+        case ("pause",):
+            if self.enable_pause:
+                core.state = CoreState.PAUSED
+        # ... more flow operations ...
+```
+
+---
+
+## Core Class
+
+Represents a single processor core.
+
+<ResponseField name="id" type="int">
+  Core identifier
+</ResponseField>
+
+<ResponseField name="scratch" type="list[int]">
+  Scratch space (register file)
+</ResponseField>
+
+<ResponseField name="trace_buf" type="list[int]">
+  Trace buffer for debug output
+</ResponseField>
+
+<ResponseField name="pc" type="int" default="0">
+  Program counter
+</ResponseField>
+
+<ResponseField name="state" type="CoreState" default="RUNNING">
+  Current execution state
+</ResponseField>
+
+```python problem.py:24-30
+@dataclass
+class Core:
+    id: int
+    scratch: list[int]
+    trace_buf: list[int]
+    pc: int = 0
+    state: CoreState = CoreState.RUNNING
+```
+
+---
+
+## CoreState Enum
+
+Execution states for processor cores.
+
+<ResponseField name="RUNNING" type="CoreState">
+  Core is actively executing instructions
+</ResponseField>
+
+<ResponseField name="PAUSED" type="CoreState">
+  Core is paused (hit a `pause` instruction)
+</ResponseField>
+
+<ResponseField name="STOPPED" type="CoreState">
+  Core has halted or reached end of program
+</ResponseField>
+
+```python problem.py:18-22
+class CoreState(Enum):
+    RUNNING = 1
+    PAUSED = 2
+    STOPPED = 3
+```
+
+---
+
+## Example: Instruction Format
+
+```python
+program = [
+    # Load constants
+    {"load": [("const", 0, 10), ("const", 1, 20)]},
+    
+    # Parallel ALU operations
+    {"alu": [
+        ("+", 2, 0, 1),   # scratch[2] = scratch[0] + scratch[1]
+        ("*", 3, 0, 1),   # scratch[3] = scratch[0] * scratch[1]
+    ]},
+    
+    # Vector broadcast and operation
+    {"valu": [
+        ("vbroadcast", 8, 0),  # Broadcast scratch[0] to scratch[8:16]
+        ("+", 16, 8, 24),      # Vector add
+    ]},
+    
+    # Memory operations
+    {"load": [("vload", 32, 2)],
+     "store": [("vstore", 3, 16)]},
+    
+    # Control flow
+    {"flow": [("halt",)]}
+]
+
+machine = Machine(mem, program, debug_info)
+machine.run()
+print(f"Cycles: {machine.cycle}")
+```
+
+---
+
+## Performance Characteristics
+
+<CardGroup cols={2}>
+  <Card title="Scalar ALU" icon="calculator">
+    12 operations per cycle
+  </Card>
+  <Card title="Vector ALU" icon="arrows-split-up-and-left">
+    6 operations per cycle (48 elements with VLEN=8)
+  </Card>
+  <Card title="Memory Bandwidth" icon="memory">
+    2 loads + 2 stores per cycle (or 16 loads + 16 stores with vectors)
+  </Card>
+  <Card title="Control Flow" icon="code-branch">
+    1 flow operation per cycle
+  </Card>
+</CardGroup>
+
+<div style={{backgroundColor: "#CA8A67", padding: "12px", borderRadius: "6px", marginTop: "16px"}}>
+  <strong style={{color: "white"}}>Key to Performance</strong>
+  <p style={{color: "white", margin: "4px 0 0 0", fontSize: "14px"}}>Maximize instruction-level parallelism by packing multiple independent operations into each cycle. Use vector instructions to process 8x more data per cycle.</p>
+</div>

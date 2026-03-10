@@ -1,0 +1,419 @@
+---
+title: 'Optimization Strategies'
+description: 'Techniques for reducing cycle count in your kernel implementation'
+icon: 'gauge-high'
+---
+
+## Understanding the Baseline
+
+The baseline implementation in `build_kernel()` processes inputs **one at a time** using **scalar operations** with **no instruction packing**:
+
+```python
+# Baseline characteristics:
+- One instruction per bundle (no VLIW parallelism)
+- One input processed per iteration (no SIMD vectorization)
+- Sequential memory operations (no prefetching)
+- Unrolled loops generated at compile time
+
+# Baseline performance: 147,734 cycles
+```
+
+<Card title="The Goal" icon="trophy" color="#CA8A67">
+Optimize from the baseline of **147,734 cycles** down as far as possible using VLIW, SIMD, and clever scheduling.
+</Card>
+
+## Key Optimization Techniques
+
+<AccordionGroup>
+  <Accordion title="1. VLIW Instruction Packing" icon="cube">
+    
+    **What:** Pack multiple independent operations into the same instruction bundle.
+
+    **Why:** The architecture has multiple execution engines that can run in parallel:
+    - 12 ALU slots
+    - 6 VALU (vector ALU) slots
+    - 2 load slots
+    - 2 store slots
+    - 1 flow control slot
+
+    **Baseline Issue:**
+    ```python perf_takehome.py:51-56
+    def build(self, slots: list[tuple[Engine, tuple]], vliw: bool = False):
+        # Simple slot packing that just uses one slot per instruction bundle
+        instrs = []
+        for engine, slot in slots:
+            instrs.append({engine: [slot]})  # One slot per bundle!
+        return instrs
+    ```
+
+    **Optimization Approach:**
+    ```python
+    # Instead of:
+    {"alu": [(op1)]}
+    {"alu": [(op2)]}
+    {"load": [(load1)]}
+    
+    # Pack independent operations:
+    {"alu": [(op1), (op2), (op3)], "load": [(load1), (load2)]}
+    ```
+
+    <Warning>
+    **Dependency Constraint:** Operations in the same bundle cannot depend on each other. All reads happen before all writes.
+    </Warning>
+
+    **Example from Hash Function:**
+    ```python perf_takehome.py:77-86
+    # These hash operations have dependencies:
+    slots.append(("alu", (op1, tmp1, val_hash_addr, const1)))  # tmp1 = val ^ const
+    slots.append(("alu", (op3, tmp2, val_hash_addr, const2)))  # tmp2 = val << 12
+    slots.append(("alu", (op2, val_hash_addr, tmp1, tmp2)))     # val = tmp1 + tmp2
+    
+    # First two can be packed (independent), third must be separate:
+    {"alu": [(op1, tmp1, ...), (op3, tmp2, ...)]}
+    {"alu": [(op2, val, tmp1, tmp2)]}
+    ```
+
+    **Impact:** Can reduce instruction count by 3-5x in dense computation sections.
+
+  </Accordion>
+
+  <Accordion title="2. SIMD Vectorization" icon="layer-group">
+    
+    **What:** Process multiple inputs simultaneously using vector instructions.
+
+    **Why:** The architecture supports vectors of length `VLEN = 8`.
+
+    **Baseline Issue:**
+    ```python perf_takehome.py:134-136
+    for round in range(rounds):
+        for i in range(batch_size):  # Process ONE input at a time
+            # ... scalar operations ...
+    ```
+
+    **Optimization Approach:**
+    ```python
+    # Process 8 inputs at once:
+    for round in range(rounds):
+        for i in range(0, batch_size, 8):  # Step by VLEN
+            # Use vload, valu, vstore for 8-wide operations
+    ```
+
+    **Vector Instructions:**
+    - `vload` - Load 8 consecutive memory words
+    - `vstore` - Store 8 consecutive memory words
+    - `valu` - Vector arithmetic (8 operations in parallel)
+    - `vbroadcast` - Copy scalar to all 8 vector lanes
+
+    **Memory Layout Consideration:**
+    ```python
+    # Scalar loads (baseline):
+    body.append(("alu", ("+", tmp_addr, base, i_const)))
+    body.append(("load", ("load", tmp_val, tmp_addr)))
+    
+    # Vector loads (optimized):
+    # Requires: base + i points to 8 consecutive values
+    body.append(("alu", ("+", tmp_addr, base, i_const)))
+    body.append(("load", ("vload", tmp_val_vec, tmp_addr)))  # tmp_val_vec is 8 words
+    ```
+
+    <Tip>
+    Allocate vector scratch space: `vec_addr = self.alloc_scratch("vec_tmp", VLEN)`
+    </Tip>
+
+    **Challenge:** The tree traversal has data-dependent memory accesses:
+    ```python perf_takehome.py:146-148
+    # node_val = mem[forest_values_p + idx]
+    # idx is different for each input!
+    body.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], tmp_idx)))
+    body.append(("load", ("load", tmp_node_val, tmp_addr)))
+    ```
+
+    **Solution Strategies:**
+    1. Use scalar loads in a loop for the 8 vector elements
+    2. Reorganize data layout for contiguous access (if possible)
+    3. Accept gather/scatter overhead for this bottleneck
+
+    **Impact:** Up to 8x throughput improvement for vectorizable operations.
+
+  </Accordion>
+
+  <Accordion title="3. Loop Unrolling" icon="rotate">
+    
+    **What:** Replicate loop body multiple times to reduce loop overhead and expose more parallelism.
+
+    **Baseline Already Does This:**
+    ```python perf_takehome.py:134-170
+    for round in range(rounds):        # Unrolled at compile time
+        for i in range(batch_size):    # Unrolled at compile time
+            # ... operations ...
+    ```
+
+    The Python loops generate static instruction sequences—there's no runtime loop overhead!
+
+    **Further Unrolling Strategies:**
+    
+    1. **Process multiple vectors per iteration:**
+       ```python
+       for i in range(0, batch_size, 16):  # Process 16 inputs (2 vectors)
+           # ... operations for inputs i:i+8 ...
+           # ... operations for inputs i+8:i+16 ...
+       ```
+       *Benefit:* Exposes more independent operations for VLIW packing.
+
+    2. **Unroll hash stages:**
+       ```python perf_takehome.py:80-85
+       for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
+           # 6 iterations, each generates 3 ALU ops
+       ```
+       *Already unrolled*, but you could manually schedule all 18 ALU operations for better packing.
+
+    <Warning>
+    **Code Size Tradeoff:** Excessive unrolling increases instruction count, which can hurt cache behavior (though the simulator doesn't model instruction cache).
+    </Warning>
+
+  </Accordion>
+
+  <Accordion title="4. Memory Access Optimization" icon="database">
+    
+    **What:** Minimize memory latency and maximize throughput.
+
+    **Key Insights:**
+    - The simulator has **2 load slots** and **2 store slots** per cycle
+    - Memory operations complete in the same cycle (no modeled latency)
+    - Loads and stores can be packed with computation
+
+    **Baseline Pattern:**
+    ```python perf_takehome.py:138-145
+    # Load idx
+    body.append(("alu", ("+", tmp_addr, base, offset)))  # Compute address
+    body.append(("load", ("load", tmp_idx, tmp_addr)))   # Load value
+    
+    # Load val
+    body.append(("alu", ("+", tmp_addr, base2, offset)))
+    body.append(("load", ("load", tmp_val, tmp_addr)))
+    ```
+
+    **Optimization 1: Pack Address Computation**
+    ```python
+    # Compute both addresses in parallel:
+    {"alu": [
+        ("+", tmp_addr1, base1, offset),
+        ("+", tmp_addr2, base2, offset)
+    ]}
+    # Then load both:
+    {"load": [
+        ("load", tmp_idx, tmp_addr1),
+        ("load", tmp_val, tmp_addr2)
+    ]}
+    ```
+
+    **Optimization 2: Vector Loads**
+    ```python
+    # Load 8 values in one instruction:
+    {"load": [("vload", vec_dst, addr_scalar)]}
+    ```
+
+    **Optimization 3: Prefetch (Limited Benefit)**
+    Since loads complete immediately, prefetching only helps if you can hide address computation latency.
+
+    <Tip>
+    **Store Buffering:** Delay stores to the end of computation when possible. This frees up store slots during the critical path.
+    </Tip>
+
+  </Accordion>
+
+  <Accordion title="5. Instruction Scheduling" icon="timeline">
+    
+    **What:** Reorder operations to maximize VLIW slot utilization.
+
+    **Goal:** Keep all execution engines busy every cycle.
+
+    **Dependency Graph Example:**
+    ```
+    A = load(addr1)     [load engine]
+    B = load(addr2)     [load engine]
+    C = A + B           [alu engine, depends on A and B]
+    D = C * 2           [alu engine, depends on C]
+    E = load(addr3)     [load engine]
+    F = E + 1           [alu engine, depends on E]
+    ```
+
+    **Bad Schedule (Baseline Style):**
+    ```
+    Cycle 0: {"load": [(load A)]}
+    Cycle 1: {"load": [(load B)]}
+    Cycle 2: {"alu": [(C = A + B)]}
+    Cycle 3: {"alu": [(D = C * 2)]}
+    Cycle 4: {"load": [(load E)]}
+    Cycle 5: {"alu": [(F = E + 1)]}
+    Total: 6 cycles
+    ```
+
+    **Good Schedule (VLIW + Reorder):**
+    ```
+    Cycle 0: {"load": [(load A), (load B)]}
+    Cycle 1: {"alu": [(C = A + B)], "load": [(load E)]}
+    Cycle 2: {"alu": [(D = C * 2), (F = E + 1)]}
+    Total: 3 cycles (2x speedup!)
+    ```
+
+    **Strategy:**
+    1. Build a dependency graph
+    2. Schedule independent operations into the same cycle
+    3. Respect engine slot limits
+    4. Minimize critical path length
+
+    **Tools:**
+    - List scheduling algorithms
+    - Topological sort of dependency DAG
+    - Manual analysis for hot loops
+
+  </Accordion>
+</AccordionGroup>
+
+## Common Pitfalls
+
+<Warning>
+### 1. Read-After-Write Hazards
+
+Operations in the same bundle cannot have dependencies:
+
+```python
+# WRONG: tmp is written and read in same bundle
+{"alu": [
+    ("+", tmp, a, b),    # Write tmp
+    ("*", result, tmp, c) # Read tmp - NOT ALLOWED!
+]}
+
+# CORRECT: Split into two cycles
+{"alu": [("+", tmp, a, b)]}
+{"alu": [("*", result, tmp, c)]}
+```
+</Warning>
+
+<Warning>
+### 2. Vector Alignment Issues
+
+Vector operations assume contiguous memory:
+
+```python
+# OK: Indices are stored contiguously
+vload(vec_indices, inp_indices_p + round_offset)
+
+# PROBLEM: Tree values are accessed via computed indices
+# Cannot vectorize: mem[forest_values_p + idx] for different idx values
+```
+</Warning>
+
+<Warning>
+### 3. Scratch Space Exhaustion
+
+Vector operations consume 8x scratch space:
+
+```python
+SCRATCH_SIZE = 1536  # Total available
+
+# Baseline scalars:
+tmp_val = self.alloc_scratch("tmp_val", 1)  # 1 word
+
+# Vector version:
+vec_val = self.alloc_scratch("vec_val", 8)  # 8 words!
+
+# Processing 256 inputs with 8-wide vectors needs careful planning
+```
+
+**Solution:** Reuse scratch space across loop iterations.
+</Warning>
+
+<Warning>
+### 4. Premature Optimization
+
+Profile before optimizing:
+
+```python
+# Enable tracing to see where cycles are spent:
+do_kernel_test(10, 16, 256, trace=True)
+# Then run: python watch_trace.py
+```
+
+Focus on:
+- The innermost loop (most cycles)
+- Hash function (24 instructions per input)
+- Load bottlenecks
+</Warning>
+
+## Optimization Workflow
+
+<Steps>
+  <Step title="Measure Baseline">
+    Run `python perf_takehome.py Tests.test_kernel_cycles` to get your starting point.
+    
+    ```bash
+    CYCLES: 147734
+    Speedup over baseline: 1.0
+    ```
+  </Step>
+
+  <Step title="Trace Analysis">
+    Generate a performance trace:
+    
+    ```bash
+    python perf_takehome.py Tests.test_kernel_trace
+    python watch_trace.py
+    ```
+    
+    Look for:
+    - Empty execution slots (wasted parallelism)
+    - Long serial chains (critical path)
+    - Repeated patterns (unrolling opportunities)
+  </Step>
+
+  <Step title="Apply One Technique">
+    Start with the highest-impact optimization:
+    - **Quick win:** VLIW packing in hash function (3x speedup potential)
+    - **Medium:** Vectorize main loop body (8x throughput)
+    - **Advanced:** Custom scheduling for the entire kernel
+  </Step>
+
+  <Step title="Validate Correctness">
+    Always run correctness tests after changes:
+    
+    ```bash
+    python tests/submission_tests.py
+    ```
+    
+    The debug engine compares your results against the reference at every step.
+  </Step>
+
+  <Step title="Iterate">
+    Measure → Trace → Optimize → Validate → Repeat
+  </Step>
+</Steps>
+
+## Expected Performance Tiers
+
+<CardGroup cols={3}>
+  <Card title="Bronze" icon="medal" color="#CD7F32">
+    **2-3x** speedup
+    
+    Basic VLIW packing in hash function
+  </Card>
+  
+  <Card title="Silver" icon="medal" color="#C0C0C0">
+    **5-10x** speedup
+    
+    SIMD vectorization + instruction packing
+  </Card>
+  
+  <Card title="Gold" icon="medal" color="#FFD700">
+    **15x+** speedup
+    
+    Aggressive scheduling, loop transformations, full utilization
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<Card title="Study Reference Implementations" icon="book" href="/kernel/reference-implementations">
+Understand the expected behavior by examining `reference_kernel()` and `reference_kernel2()`.
+</Card>

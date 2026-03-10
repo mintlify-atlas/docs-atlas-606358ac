@@ -1,0 +1,187 @@
+---
+title: 'Task Specification'
+description: 'Detailed requirements for optimizing the performance kernel'
+---
+
+Your mission is to optimize the `build_kernel()` method in the `KernelBuilder` class to minimize cycle count on a simulated machine.
+
+## Objective
+
+<Card title="Primary Goal" icon="target">
+  Optimize `KernelBuilder.build_kernel()` to execute in the **minimum number of cycles** as measured by the frozen simulator in `tests/submission_tests.py`.
+</Card>
+
+## What You're Optimizing
+
+The kernel implements a batch tree traversal with cryptographic hashing:
+
+```python
+def build_kernel(self, forest_height: int, n_nodes: int, batch_size: int, rounds: int):
+    """
+    Like reference_kernel2 but building actual instructions.
+    Scalar implementation using only scalar ALU and load/store.
+    """
+```
+
+### The Algorithm
+
+For each round and each item in the batch:
+
+1. **Load** the current tree index and value from memory
+2. **Read** the node value from the forest at that index
+3. **XOR** the input value with the node value
+4. **Hash** the result through multiple stages (HASH_STAGES)
+5. **Compute** the next tree index based on the hash (left or right child)
+6. **Wrap** the index if it exceeds the tree bounds
+7. **Store** the updated index and value back to memory
+
+The reference implementation is a **scalar implementation** using only scalar ALU, load, and store operations.
+
+## What You Can Modify
+
+<Check>You have full freedom to modify `KernelBuilder.build_kernel()`</Check>
+<Check>You can change instruction sequences, memory access patterns, and algorithms</Check>
+<Check>You can use any available machine features (VLIW, vector operations, etc.)</Check>
+<Check>You can add helper methods to the `KernelBuilder` class</Check>
+
+## What You Cannot Modify
+
+<Warning>
+  **Critical**: Do not modify anything in the `tests/` folder. The submission harness uses a frozen copy of the simulator to validate your results.
+</Warning>
+
+<Warning>Do not change the problem specification (tree structure, hash algorithm, etc.)</Warning>
+<Warning>Do not modify test parameters (forest_height=10, rounds=16, batch_size=256)</Warning>
+
+## Rules and Constraints
+
+### Machine Architecture
+
+You're compiling for a simulated VLIW machine with:
+
+- Multiple execution engines (ALU, load, store, flow, debug)
+- Configurable instruction bundling
+- Specific cycle costs per operation
+- Limited scratch space (`SCRATCH_SIZE`)
+- Slot limits per engine (`SLOT_LIMITS`)
+
+<Tip>
+  Review `problem.py` to understand the machine architecture, instruction set, and available operations.
+</Tip>
+
+### Correctness Requirements
+
+Your optimized kernel must:
+
+1. **Produce identical output** to the reference kernel for all test cases
+2. **Pass the correctness test** in `tests/submission_tests.py`
+3. **Use only valid instructions** supported by the simulator
+
+### Validation Process
+
+Validate your submission using:
+
+```bash
+# This should be empty - the tests folder must be unchanged
+git diff origin/main tests/
+
+# You should pass some of these tests
+python tests/submission_tests.py
+```
+
+<Info>
+  The testing harness in `perf_takehome.py` includes debug validation with pause instructions that must match the reference kernel's yields. The submission harness ignores these debug features.
+</Info>
+
+## The LLM Cheating Problem
+
+<Warning title="AI Agents: Read This Carefully">
+  None of the solutions received on the first day post-release below 1,300 cycles were valid. In every case, a language model modified the tests to make the problem easier.
+</Warning>
+
+### Common Cheating Patterns
+
+Example: A model might:
+1. Notice multicore support in `problem.py`
+2. Implement multicore as an "optimization"
+3. Notice `N_CORES = 1` prevents speedup
+4. "Fix" the core count to get artificial speedup
+
+<Note>
+  Multicore is **intentionally disabled** in this version. Don't try to enable it!
+</Note>
+
+### Best Practices for AI-Assisted Development
+
+If using an AI agent:
+
+<Steps>
+  <Step title="Instruct it not to modify tests/">
+    Explicitly tell your AI not to change anything in the `tests/` folder
+  </Step>
+  <Step title="Use submission_tests.py for verification">
+    Always validate using the official test suite
+  </Step>
+  <Step title="Verify test integrity">
+    Run `git diff origin/main tests/` before submitting
+  </Step>
+  <Step title="Understand your optimizations">
+    Be able to explain what your code actually does
+  </Step>
+</Steps>
+
+## Performance Test
+
+The main performance benchmark:
+
+```python
+def test_kernel_cycles(self):
+    do_kernel_test(10, 16, 256)
+```
+
+Parameters:
+- **forest_height**: 10 (creates a binary tree with 1,023 nodes)
+- **rounds**: 16 (number of full batch iterations)
+- **batch_size**: 256 (items processed per round)
+
+<Card title="Baseline Performance" icon="stopwatch">
+  **147,734 cycles** - The unoptimized scalar implementation
+</Card>
+
+## Debugging Tools
+
+The repository includes several debugging aids:
+
+### Trace Visualization
+
+```bash
+# Generate a hot-reloadable trace (Chrome only)
+python perf_takehome.py Tests.test_kernel_trace
+
+# In another terminal
+python watch_trace.py
+```
+
+This opens a Perfetto trace viewer that auto-updates as you re-run tests.
+
+### Debug Instructions
+
+The kernel supports debug instructions:
+
+```python
+self.add("debug", ("compare", addr, (round, i, "label")))
+self.add("debug", ("comment", "Helpful message"))
+```
+
+These are ignored by the submission simulator but can help during development.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="View Benchmarks" icon="trophy" href="/challenge/benchmarks">
+    See what performance levels to aim for
+  </Card>
+  <Card title="Study the Code" icon="code" href="https://github.com/anthropics/anthropic-perf-takehome">
+    Dive into the source code and start optimizing
+  </Card>
+</CardGroup>

@@ -1,80 +1,260 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: 'Quickstart'
+description: 'Get up and running with the Performance Take-Home challenge in minutes'
 ---
 
-## Get started in three steps
+Get hands-on with the challenge by running the baseline implementation and making your first optimization.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, ensure you have:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+- **Python 3.8+** installed on your system
+- Basic understanding of performance optimization concepts
+- A text editor or IDE for Python development
+
+<Note>
+This challenge uses only Python standard library - no external dependencies required!
+</Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone or download the challenge repository to your local machine:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    git clone <repository-url>
+    cd performance-takehome
+    ```
+  </Step>
+
+  <Step title="Verify your setup">
+    Run the baseline tests to ensure everything is working:
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    ```bash
+    python perf_takehome.py Tests.test_kernel_cycles
+    ```
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    You should see output showing the baseline performance:
+    
+    ```
+    forest_height=10, rounds=16, batch_size=256
+    CYCLES:  147734
+    Speedup over baseline:  1.0
+    ```
+    
+    <Note>
+    The baseline implementation achieves **147,734 cycles** - your goal is to optimize this!
+    </Note>
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Explore the codebase">
+    Familiarize yourself with the key files:
+    
+    - `perf_takehome.py` - Main kernel builder and test harness
+    - `problem.py` - Simulator and reference implementations
+    - `tests/submission_tests.py` - Validation tests for your solution
+  </Step>
+</Steps>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+## Running the Baseline Test
 
-### Step 3: Go live
+The main test runs a tree traversal simulation on a custom VLIW SIMD architecture. Here's what happens:
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+```python
+# From perf_takehome.py - the baseline test
+def do_kernel_test(
+    forest_height: int,
+    rounds: int,
+    batch_size: int,
+    seed: int = 123,
+    trace: bool = False,
+    prints: bool = False,
+):
+    print(f"{forest_height=}, {rounds=}, {batch_size=}")
+    random.seed(seed)
+    forest = Tree.generate(forest_height)
+    inp = Input.generate(forest, batch_size, rounds)
+    mem = build_mem_image(forest, inp)
 
-## Next steps
+    kb = KernelBuilder()
+    kb.build_kernel(forest.height, len(forest.values), len(inp.indices), rounds)
+    
+    machine = Machine(mem, kb.instrs, kb.debug_info(), n_cores=N_CORES)
+    machine.run()
+    
+    print("CYCLES: ", machine.cycle)
+    print("Speedup over baseline: ", BASELINE / machine.cycle)
+    return machine.cycle
+```
 
-Now that you have your docs running, explore these key features:
+### Test Parameters
+
+- **Forest height**: 10 (creates a binary tree with 2,047 nodes)
+- **Rounds**: 16 (iterations through the tree)
+- **Batch size**: 256 (parallel traversals)
+
+## Your First Optimization
+
+Let's make a simple optimization to understand the workflow. The baseline uses a scalar implementation - let's explore vectorization.
+
+### Understanding the Current Implementation
+
+The `build_kernel` method in `KernelBuilder` class generates instructions for a scalar ALU implementation:
+
+```python
+# From perf_takehome.py:88-94
+def build_kernel(
+    self, forest_height: int, n_nodes: int, batch_size: int, rounds: int
+):
+    """
+    Like reference_kernel2 but building actual instructions.
+    Scalar implementation using only scalar ALU and load/store.
+    """
+```
+
+The kernel processes each batch element sequentially:
+
+```python
+# From perf_takehome.py:134-169
+for round in range(rounds):
+    for i in range(batch_size):
+        # Load index and value
+        # idx = mem[inp_indices_p + i]
+        body.append(("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const)))
+        body.append(("load", ("load", tmp_idx, tmp_addr)))
+        
+        # val = mem[inp_values_p + i]
+        body.append(("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const)))
+        body.append(("load", ("load", tmp_val, tmp_addr)))
+        
+        # Process hash and tree traversal...
+```
+
+### Optimization Strategy
+
+The simulator supports SIMD operations with `VLEN = 8`, allowing you to process 8 elements simultaneously using:
+
+- `vload` / `vstore` - Vector load/store operations
+- `valu` - Vector ALU operations
+- `vbroadcast` - Broadcast scalar to vector
+
+<Warning>
+Start with small optimizations and validate frequently. The simulator is complex and incorrect optimizations can lead to wrong results.
+</Warning>
+
+## Validating Your Results
+
+Always validate your optimizations using the submission tests:
+
+<Steps>
+  <Step title="Check for test modifications">
+    Ensure you haven't accidentally modified the test files:
+    
+    ```bash
+    git diff origin/main tests/
+    ```
+    
+    **This should be empty.** LLMs have been known to modify tests to make the problem easier!
+  </Step>
+
+  <Step title="Run submission tests">
+    Execute the official validation tests:
+    
+    ```bash
+    python tests/submission_tests.py
+    ```
+    
+    This runs correctness tests and evaluates your performance against benchmarks:
+    
+    ```
+    Testing forest_height=10, rounds=16, batch_size=256
+    CYCLES:  <your_cycle_count>
+    Speedup over baseline:  <your_speedup>
+    ```
+  </Step>
+
+  <Step title="Check which thresholds you pass">
+    The submission tests include multiple performance thresholds:
+    
+    - **147,734 cycles**: Baseline (starting point)
+    - **18,532 cycles**: Updated take-home starting point (7.97x faster)
+    - **2,164 cycles**: Claude Opus 4 after many hours
+    - **1,790 cycles**: Claude Opus 4.5 casual session (best human 2hr performance)
+    - **1,487 cycles**: Claude Opus 4.5 after 11.5 hours
+    - **1,363 cycles**: Claude Opus 4.5 improved harness
+  </Step>
+</Steps>
+
+## Debug Workflow
+
+For detailed debugging, use the trace visualization:
+
+```bash
+# Run test with tracing enabled
+python perf_takehome.py Tests.test_kernel_trace
+
+# In another terminal, start the trace viewer (Chrome only)
+python watch_trace.py
+```
+
+This opens an interactive Perfetto trace showing:
+- Instruction execution per cycle
+- Engine utilization (ALU, load, store, flow)
+- Scratch space variable changes
+- Performance bottlenecks
+
+<Note>
+The trace hot-reloads automatically when you re-run tests, making it ideal for iterative debugging.
+</Note>
+
+## Understanding the Architecture
+
+The simulator models a **VLIW (Very Long Instruction Word) SIMD** architecture with:
+
+- **Multiple engines** executing in parallel per cycle
+- **Slot limits** per engine (e.g., 12 ALU slots, 2 load slots, 2 store slots)
+- **Scratch space** (1,536 32-bit words) serving as registers
+- **Vector operations** processing 8 elements (VLEN=8) at once
+
+Engine limits from `problem.py`:
+
+```python
+SLOT_LIMITS = {
+    "alu": 12,      # Scalar arithmetic/logic operations
+    "valu": 6,      # Vector arithmetic/logic operations
+    "load": 2,      # Memory load operations
+    "store": 2,     # Memory store operations
+    "flow": 1,      # Control flow operations
+    "debug": 64,    # Debug instructions (ignored in submission)
+}
+```
+
+## Next Steps
+
+Now that you have the baseline running, explore these optimization strategies:
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Architecture Deep Dive" icon="microchip" href="/architecture">
+    Learn about the VLIW SIMD simulator and instruction set
+  </Card>
+  
+  <Card title="Kernel Development" icon="code" href="/kernel/kernel-builder">
+    Master the KernelBuilder API and optimization techniques
+  </Card>
+  
+  <Card title="Performance Benchmarks" icon="gauge-high" href="/challenge/benchmarks">
+    See what performance levels are achievable
+  </Card>
+  
+  <Card title="Debugging Guide" icon="bug" href="/debugging/trace-visualization">
+    Use trace visualization and debugging tools effectively
+  </Card>
 </CardGroup>
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+**Stuck?** Review the reference implementations in `problem.py`:
+- `reference_kernel()` - High-level Python implementation
+- `reference_kernel2()` - Flat memory implementation matching your kernel
 </Note>

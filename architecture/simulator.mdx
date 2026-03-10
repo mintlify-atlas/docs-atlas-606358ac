@@ -1,0 +1,208 @@
+---
+title: Simulator Overview
+description: Understanding the custom VLIW SIMD architecture simulator
+---
+
+## Machine Class Overview
+
+The `Machine` class (defined in `problem.py`) is the core simulator for a custom VLIW SIMD architecture designed for parallel computation workloads.
+
+```python problem.py
+class Machine:
+    """
+    Simulator for a custom VLIW SIMD architecture.
+    
+    VLIW (Very Large Instruction Word): Cores are composed of different
+    "engines" each of which can execute multiple "slots" per cycle in parallel.
+    """
+    def __init__(self, mem_dump, program, debug_info, n_cores=1, 
+                 scratch_size=SCRATCH_SIZE, trace=False):
+        self.cores = [Core(id=i, scratch=[0] * scratch_size, trace_buf=[]) 
+                      for i in range(n_cores)]
+        self.mem = copy(mem_dump)
+        self.program = program
+        self.cycle = 0
+```
+
+<Note>
+The current version uses `N_CORES = 1`, though the architecture supports multiple cores.
+</Note>
+
+## Core Architecture
+
+Each core is represented by a dataclass with the following components:
+
+```python problem.py
+@dataclass
+class Core:
+    id: int                     # Core identifier
+    scratch: list[int]          # Scratch space (acts as registers)
+    trace_buf: list[int]        # Buffer for trace output
+    pc: int = 0                 # Program counter
+    state: CoreState = CoreState.RUNNING
+```
+
+### Core States
+
+<Tabs>
+  <Tab title="RUNNING">
+    Core is actively executing instructions. The default state.
+  </Tab>
+  <Tab title="PAUSED">
+    Core execution is paused (via `pause` instruction). Can be resumed by calling `run()` again.
+  </Tab>
+  <Tab title="STOPPED">
+    Core has halted (via `halt` instruction or reached end of program). Cannot resume.
+  </Tab>
+</Tabs>
+
+## Execution Model
+
+### The run() Method
+
+The main execution loop processes all cores until they stop:
+
+```python problem.py
+def run(self):
+    # Resume paused cores
+    for core in self.cores:
+        if core.state == CoreState.PAUSED:
+            core.state = CoreState.RUNNING
+    
+    # Execute until all cores stop
+    while any(c.state == CoreState.RUNNING for c in self.cores):
+        has_non_debug = False
+        for core in self.cores:
+            if core.state != CoreState.RUNNING:
+                continue
+            if core.pc >= len(self.program):
+                core.state = CoreState.STOPPED
+                continue
+            
+            instr = self.program[core.pc]
+            core.pc += 1
+            self.step(instr, core)
+            
+            if any(name != "debug" for name in instr.keys()):
+                has_non_debug = True
+        
+        if has_non_debug:
+            self.cycle += 1
+```
+
+<Note>
+Debug instructions do **not** increment the cycle counter, allowing you to add debugging without affecting performance measurements.
+</Note>
+
+### The step() Method
+
+Each instruction bundle executes all engines in parallel:
+
+```python problem.py
+def step(self, instr: Instruction, core):
+    ENGINE_FNS = {
+        "alu": self.alu,
+        "valu": self.valu,
+        "load": self.load,
+        "store": self.store,
+        "flow": self.flow,
+    }
+    
+    self.scratch_write = {}
+    self.mem_write = {}
+    
+    # Execute all engine slots
+    for name, slots in instr.items():
+        assert len(slots) <= SLOT_LIMITS[name]
+        for i, slot in enumerate(slots):
+            ENGINE_FNS[name](core, *slot)
+    
+    # Apply writes atomically at end of cycle
+    for addr, val in self.scratch_write.items():
+        core.scratch[addr] = val
+    for addr, val in self.mem_write.items():
+        self.mem[addr] = val
+```
+
+<Warning>
+**Critical**: All writes are buffered and applied **atomically at the end of the cycle**. Instructions read the state from the beginning of the cycle, preventing read-after-write hazards within a single instruction bundle.
+</Warning>
+
+## Cycle Counting
+
+The performance metric for this architecture is **cycle count**:
+
+- Each instruction bundle with at least one non-debug operation increments the cycle counter
+- Debug engine instructions (like `compare`, `vcompare`) do not count toward cycles
+- The baseline reference implementation takes **147,734 cycles** for the benchmark workload
+
+```python perf_takehome.py
+BASELINE = 147734
+
+# After running your kernel:
+print("CYCLES: ", machine.cycle)
+print("Speedup over baseline: ", BASELINE / machine.cycle)
+```
+
+## Trace Format for Debugging
+
+The simulator can generate execution traces in Chrome's Trace Event Format:
+
+```python problem.py
+machine = Machine(mem, program, debug_info, trace=True)
+machine.run()
+# Creates trace.json viewable in Perfetto or chrome://tracing
+```
+
+### Viewing Traces
+
+<Steps>
+  <Step title="Generate trace">
+    Run your test with `trace=True`:
+    ```bash
+    python perf_takehome.py Tests.test_kernel_trace
+    ```
+  </Step>
+  <Step title="Hot-reload viewer">
+    In a separate terminal:
+    ```bash
+    python watch_trace.py
+    ```
+    Click "Open Perfetto" in the browser tab that opens.
+  </Step>
+  <Step title="Analyze">
+    Re-run the test to see updated traces automatically reload in Perfetto.
+  </Step>
+</Steps>
+
+### Trace Contents
+
+The trace shows:
+- **Per-engine slots**: Visual timeline of which operations execute in each slot
+- **Scratch space updates**: When each scratch variable is written
+- **Operation details**: Hover over operations to see instruction details and named arguments
+- **Cycle boundaries**: Vertical alignment shows parallel execution
+
+<Accordion title="Example trace snippet">
+```json
+{"name": "*", "cat": "op", "ph": "X", "pid": 0, "tid": 1, 
+ "ts": 0, "dur": 1, 
+ "args": {"slot": "('*', 4, 0, 0)", "named": "('*', 'tmp_val', 'tmp_val', 'tmp_node_val')"}}
+```
+
+This shows a multiply operation in slot 1 at cycle 0, with scratch addresses mapped to variable names.
+</Accordion>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="VLIW & SIMD Concepts" icon="microchip" color="#CA8A67" href="/architecture/vliw-simd">
+    Learn about parallel execution and vectorization
+  </Card>
+  <Card title="Memory Model" icon="memory" color="#CA8A67" href="/architecture/memory-model">
+    Understand memory layout and scratch space
+  </Card>
+  <Card title="Instruction Set" icon="code" color="#CA8A67" href="/architecture/instruction-set">
+    Complete ISA reference for all engines
+  </Card>
+</CardGroup>

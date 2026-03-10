@@ -1,0 +1,388 @@
+---
+title: 'Validation'
+description: 'Test and validate your kernel implementation for correctness and performance'
+icon: 'check-circle'
+---
+
+## Overview
+
+Validation ensures your optimized kernel produces correct results and meets performance targets. The challenge provides multiple layers of validation, from unit tests to submission benchmarks.
+
+<Warning>
+**Correctness before performance.** Always ensure your kernel is correct before optimizing for speed.
+</Warning>
+
+## Running Unit Tests
+
+### All Tests
+
+Run all tests in `perf_takehome.py`:
+
+```bash
+python perf_takehome.py
+```
+
+### Specific Tests
+
+Run individual test methods:
+
+```bash
+python perf_takehome.py Tests.test_kernel_cycles
+```
+
+### Available Tests
+
+```python perf_takehome.py:228-258
+class Tests(unittest.TestCase):
+    def test_ref_kernels(self):
+        """Test the reference kernels against each other"""
+        
+    def test_kernel_trace(self):
+        # Full-scale example for performance testing
+        do_kernel_test(10, 16, 256, trace=True, prints=False)
+    
+    def test_kernel_cycles(self):
+        do_kernel_test(10, 16, 256)
+```
+
+<Note>
+The commented-out `test_kernel_correctness` test can be uncommented for additional debugging with various parameter combinations.
+</Note>
+
+## Submission Tests
+
+The **official validation** for your submission uses `tests/submission_tests.py`:
+
+```bash
+python tests/submission_tests.py
+```
+
+<Accordion title="Important: Don't modify tests/ folder" icon="exclamation-triangle" iconType="solid">
+From the instructions:
+```python perf_takehome.py:13-14
+Validate your results using `python tests/submission_tests.py` without modifying
+anything in the tests/ folder.
+```
+</Accordion>
+
+### Correctness Tests
+
+```python submission_tests.py:57-60
+class CorrectnessTests(unittest.TestCase):
+    def test_kernel_correctness(self):
+        for i in range(8):
+            do_kernel_test(10, 16, 256)
+```
+
+Runs 8 randomized correctness tests with the full-scale problem parameters.
+
+### Speed Tests
+
+The submission includes progressive speed thresholds:
+
+```python submission_tests.py:76-116
+class SpeedTests(unittest.TestCase):
+    def test_kernel_speedup(self):
+        assert cycles() < BASELINE  # 147734 cycles
+    
+    def test_kernel_updated_starting_point(self):
+        assert cycles() < 18532
+    
+    def test_opus4_many_hours(self):
+        assert cycles() < 2164
+    
+    def test_opus45_casual(self):
+        assert cycles() < 1790  # Best human performance in 2 hours
+    
+    def test_opus45_2hr(self):
+        assert cycles() < 1579
+```
+
+<Info>
+**You don't need to pass all speed tests** to succeed. The impressiveness isn't linear in the number of tests passed.
+</Info>
+
+## Debug Engine Instructions
+
+The simulator includes a debug engine for validating intermediate values against the reference implementation.
+
+### Compare Instructions
+
+Check scalar values during execution:
+
+```python perf_takehome.py:140-144
+body.append(("debug", ("compare", tmp_idx, (round, i, "idx"))))
+body.append(("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const)))
+body.append(("load", ("load", tmp_val, tmp_addr)))
+body.append(("debug", ("compare", tmp_val, (round, i, "val"))))
+```
+
+The debug engine compares your kernel's value against the reference:
+
+```python problem.py:366-374
+if name == "debug":
+    if not self.enable_debug:
+        continue
+    for slot in slots:
+        if slot[0] == "compare":
+            loc, key = slot[1], slot[2]
+            ref = self.value_trace[key]
+            res = core.scratch[loc]
+            assert res == ref, f"{res} != {ref} for {key} at pc={core.pc}"
+```
+
+### Vector Compare
+
+For SIMD operations, use `vcompare`:
+
+```python problem.py:375-381
+elif slot[0] == "vcompare":
+    loc, keys = slot[1], slot[2]
+    ref = [self.value_trace[key] for key in keys]
+    res = core.scratch[loc : loc + VLEN]
+    assert res == ref, (
+        f"{res} != {ref} for {keys} at pc={core.pc} loc={loc}"
+    )
+```
+
+### Debug Comments
+
+Add comments to trace output for clarity:
+
+```python perf_takehome.py:124
+self.add("debug", ("comment", "Starting loop"))
+```
+
+<Note>
+**Debug instructions are ignored by the submission simulator.** They only affect validation during development.
+</Note>
+
+## The Pause/Yield Mechanism
+
+The pause mechanism synchronizes your kernel with the reference implementation for step-by-step validation.
+
+### How It Works
+
+**Reference kernel** uses `yield` to pause at checkpoints:
+
+```python problem.py:535-568
+def reference_kernel2(mem: list[int], trace: dict[Any, int] = {}):
+    # ... initialization ...
+    yield mem  # Initial state
+    for h in range(rounds):
+        for i in range(batch_size):
+            # ... computation ...
+    yield mem  # Final state
+```
+
+**Your kernel** uses `pause` instructions to match:
+
+```python perf_takehome.py:121-123
+self.add("flow", ("pause",))
+self.add("debug", ("comment", "Starting loop"))
+```
+
+**Validation loop** steps through both:
+
+```python perf_takehome.py:206-221
+for i, ref_mem in enumerate(reference_kernel2(mem, value_trace)):
+    machine.run()  # Run until next pause
+    inp_values_p = ref_mem[6]
+    assert (
+        machine.mem[inp_values_p : inp_values_p + len(inp.values)]
+        == ref_mem[inp_values_p : inp_values_p + len(inp.values)]
+    ), f"Incorrect result on round {i}"
+```
+
+<Info>
+**Important:** Pause instructions must match the reference kernel's yields during development testing, but are ignored by the submission simulator.
+</Info>
+
+### Controlling Pause Behavior
+
+```python problem.py:116-117
+self.enable_pause = True
+self.enable_debug = True
+```
+
+Submission tests disable both:
+
+```python submission_tests.py:41-42
+machine.enable_pause = False
+machine.enable_debug = False
+```
+
+## Comparing with Reference Kernels
+
+Two reference implementations are provided:
+
+<CardGroup cols={2}>
+  <Card title="reference_kernel" icon="python" color="#CA8A67">
+    Python implementation operating on Tree and Input objects
+  </Card>
+  <Card title="reference_kernel2" icon="memory" color="#CA8A67">
+    Flat memory implementation that matches the simulator's memory layout
+  </Card>
+</CardGroup>
+
+### Using reference_kernel2 for Validation
+
+```python perf_takehome.py:229-242
+def test_ref_kernels(self):
+    """Test the reference kernels against each other"""
+    random.seed(123)
+    for i in range(10):
+        f = Tree.generate(4)
+        inp = Input.generate(f, 10, 6)
+        mem = build_mem_image(f, inp)
+        reference_kernel(f, inp)
+        for _ in reference_kernel2(mem, {}):
+            pass
+        assert inp.indices == mem[mem[5] : mem[5] + len(inp.indices)]
+        assert inp.values == mem[mem[6] : mem[6] + len(inp.values)]
+```
+
+## Common Validation Errors
+
+<AccordionGroup>
+  <Accordion title="Incorrect result on round N" icon="xmark" iconType="solid">
+    Your kernel's output doesn't match the reference at a specific iteration.
+    
+    **Debug steps:**
+    1. Add debug compare instructions at intermediate steps
+    2. Run with `prints=True` to see values
+    3. Use trace visualization to inspect scratch variables
+  </Accordion>
+  
+  <Accordion title="Assertion: res != ref for key at pc=X" icon="bug" iconType="solid">
+    A debug compare instruction failed.
+    
+    **The error shows:**
+    - `res`: Your computed value
+    - `ref`: Expected value from reference
+    - `key`: Which variable/step failed
+    - `pc`: Program counter (instruction number)
+    
+    This pinpoints exactly where your computation diverged.
+  </Accordion>
+  
+  <Accordion title="Out of scratch space" icon="memory" iconType="solid">
+    ```python perf_takehome.py:67
+    assert self.scratch_ptr <= SCRATCH_SIZE, "Out of scratch space"
+    ```
+    
+    You've allocated more than 1536 words of scratch memory. Optimize scratch usage or reuse variables.
+  </Accordion>
+  
+  <Accordion title="Exceeds slot limit" icon="limit" iconType="solid">
+    ```python problem.py:383
+    assert len(slots) <= SLOT_LIMITS[name]
+    ```
+    
+    An instruction tries to use more slots than available for that engine. Check SLOT_LIMITS and pack instructions properly.
+  </Accordion>
+</AccordionGroup>
+
+## Correctness vs Performance
+
+<Steps>
+  <Step title="Start with correctness">
+    Ensure your kernel passes all correctness tests before optimizing.
+  </Step>
+  
+  <Step title="Establish baseline">
+    Run `test_kernel_cycles` to get your initial cycle count:
+    ```python perf_takehome.py:223-225
+    print("CYCLES: ", machine.cycle)
+    print("Speedup over baseline: ", BASELINE / machine.cycle)
+    ```
+  </Step>
+  
+  <Step title="Optimize incrementally">
+    Make one optimization at a time and re-validate after each change.
+  </Step>
+  
+  <Step title="Test submission">
+    Regularly run `python tests/submission_tests.py` to ensure you haven't broken correctness.
+  </Step>
+</Steps>
+
+## Real Validation Examples
+
+### Example 1: Checking Hash Computation
+
+```python perf_takehome.py:150-152
+body.append(("alu", ("^", tmp_val, tmp_val, tmp_node_val)))
+body.extend(self.build_hash(tmp_val, tmp1, tmp2, round, i))
+body.append(("debug", ("compare", tmp_val, (round, i, "hashed_val"))))
+```
+
+This validates the hash result after XOR and hashing.
+
+### Example 2: Verifying Index Wrapping
+
+```python perf_takehome.py:160-163
+body.append(("alu", ("<", tmp1, tmp_idx, self.scratch["n_nodes"])))
+body.append(("flow", ("select", tmp_idx, tmp1, tmp_idx, zero_const)))
+body.append(("debug", ("compare", tmp_idx, (round, i, "wrapped_idx"))))
+```
+
+Ensures the index correctly wraps to 0 when it exceeds `n_nodes`.
+
+### Example 3: Full Validation Loop
+
+```python perf_takehome.py:183-221
+machine = Machine(
+    mem,
+    kb.instrs,
+    kb.debug_info(),
+    n_cores=N_CORES,
+    value_trace=value_trace,
+    trace=trace,
+)
+machine.prints = prints
+for i, ref_mem in enumerate(reference_kernel2(mem, value_trace)):
+    machine.run()
+    inp_values_p = ref_mem[6]
+    if prints:
+        print(machine.mem[inp_values_p : inp_values_p + len(inp.values)])
+        print(ref_mem[inp_values_p : inp_values_p + len(inp.values)])
+    assert (
+        machine.mem[inp_values_p : inp_values_p + len(inp.values)]
+        == ref_mem[inp_values_p : inp_values_p + len(inp.values)]
+    ), f"Incorrect result on round {i}"
+```
+
+## Debugging with Prints
+
+Enable detailed output during validation:
+
+```python
+do_kernel_test(10, 16, 256, trace=False, prints=True)
+```
+
+This prints:
+- Scratch variable states
+- Instruction details
+- Memory contents at validation points
+
+<Tip>
+Use `prints=True` when debugging specific computation errors. The output can be verbose but invaluable for understanding what's happening.
+</Tip>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Test Early, Test Often" icon="vial">
+    Run validation after every significant change
+  </Card>
+  <Card title="Use Debug Instructions" icon="bug">
+    Add compare instructions at critical computation steps
+  </Card>
+  <Card title="Understand Failures" icon="magnifying-glass">
+    Don't just fix errors — understand why they occurred
+  </Card>
+  <Card title="Keep Reference Sync" icon="arrows-rotate">
+    Maintain pause/yield alignment during development
+  </Card>
+</CardGroup>

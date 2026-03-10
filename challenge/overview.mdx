@@ -1,0 +1,65 @@
+---
+title: "Challenge Overview"
+description: "Background and context for Anthropic's original performance engineering take-home"
+---
+
+This documentation covers Anthropic's original performance take-home challenge—a real-world optimization test that evolved alongside Claude's capabilities.
+
+## The Evolution
+
+Anthropic's performance take-home has an interesting history that reflects the rapid advancement of AI capabilities:
+
+### Original 4-Hour Challenge
+
+The challenge originally started as a **4-hour take-home** with the baseline code starting at 147,734 cycles. Candidates were given this starting point and asked to optimize it as much as possible.
+
+### Updated 2-Hour Challenge
+
+After **Claude Opus 4 began outperforming most humans** at the 4-hour version, Anthropic updated the challenge:
+
+- Reduced to a **2-hour time limit**
+- Provided optimized starter code at **18,532 cycles** (7.97x faster than original baseline)
+- Added better debugging tools and more detailed instructions
+
+### Current Status
+
+After **Claude Opus 4.5** exceeded the best human 2-hour performance (achieving 1,790 cycles in a casual session), Anthropic moved to a different base for their time-limited interviews.
+
+<Note>
+  This repository contains the **original baseline version** (147,734 cycles) with the improved tooling from the 2-hour version. It's no longer used as a time-limited test, but you can still use it to impress Anthropic's recruiting team!
+</Note>
+
+## Why This Challenge?
+
+The performance take-home tests several critical skills:
+
+- **Low-level optimization**: Understanding instruction-level performance
+- **Algorithm analysis**: Identifying bottlenecks in tree traversal and hashing operations
+- **Creative problem-solving**: Finding novel approaches within tight constraints
+- **Validation discipline**: Ensuring correctness while pursuing aggressive optimizations
+
+## What Makes It Interesting
+
+This challenge is unique because:
+
+1. **Real constraints**: You're optimizing for a simulated machine with specific instruction costs
+2. **Clear metrics**: Cycle count provides unambiguous performance measurement
+3. **Multiple optimization levels**: From basic improvements to near-theoretical-minimum solutions
+4. **AI benchmark**: Your performance is directly comparable to state-of-the-art AI systems
+
+<Tip>
+  If you optimize below **1,487 cycles** (beating Claude Opus 4.5's best performance at launch), Anthropic wants to hear from you! Email [performance-recruiting@anthropic.com](mailto:performance-recruiting@anthropic.com) with your code and resume.
+</Tip>
+
+## Getting Started
+
+Ready to take on the challenge?
+
+<CardGroup cols={2}>
+  <Card title="Task Details" icon="bullseye" href="/challenge/task">
+    Learn what you need to optimize and the rules of engagement
+  </Card>
+  <Card title="Benchmarks" icon="chart-line" href="/challenge/benchmarks">
+    See performance tiers and submission requirements
+  </Card>
+</CardGroup>

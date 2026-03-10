@@ -1,0 +1,379 @@
+---
+title: Memory Model
+description: Understanding memory layout, scratch space, and data organization
+---
+
+## Memory Layout
+
+The simulator uses a flat memory model with 32-bit words. Memory is organized into distinct regions:
+
+```python problem.py
+def build_mem_image(t: Tree, inp: Input) -> list[int]:
+    """
+    Build a flat memory image of the problem.
+    """
+    header = 7
+    extra_room = len(t.values) + len(inp.indices) * 2 + VLEN * 2 + 32
+    mem = [0] * (header + len(t.values) + len(inp.indices) + 
+                 len(inp.values) + extra_room)
+    
+    forest_values_p = header
+    inp_indices_p = forest_values_p + len(t.values)
+    inp_values_p = inp_indices_p + len(inp.values)
+    extra_room = inp_values_p + len(inp.values)
+    
+    return mem
+```
+
+### Memory Regions
+
+<Tabs>
+  <Tab title="Header (0-6)">
+    Configuration and pointer region:
+    
+    | Address | Field | Description |
+    |---------|-------|-------------|
+    | 0 | `rounds` | Number of iterations to run |
+    | 1 | `n_nodes` | Total nodes in tree |
+    | 2 | `batch_size` | Number of parallel items |
+    | 3 | `forest_height` | Tree height |
+    | 4 | `forest_values_p` | Pointer to tree data |
+    | 5 | `inp_indices_p` | Pointer to indices array |
+    | 6 | `inp_values_p` | Pointer to values array |
+    
+    ```python
+    mem[0] = inp.rounds
+    mem[1] = len(t.values)
+    mem[2] = len(inp.indices)
+    mem[3] = t.height
+    mem[4] = forest_values_p
+    mem[5] = inp_indices_p
+    mem[6] = inp_values_p
+    ```
+  </Tab>
+  <Tab title="Tree Data">
+    Read-only tree node values:
+    
+    ```python
+    mem[header:inp_indices_p] = t.values
+    ```
+    
+    - Starts at `mem[4]` (value stored in header)
+    - Contains all tree node values
+    - Indexed by node ID (0 = root)
+    - Size: `n_nodes` words
+  </Tab>
+  <Tab title="Indices Array">
+    Current node indices (read-write):
+    
+    ```python
+    mem[inp_indices_p:inp_values_p] = inp.indices
+    ```
+    
+    - Starts at `mem[5]`
+    - One per batch item
+    - Updated each round
+    - Size: `batch_size` words
+  </Tab>
+  <Tab title="Values Array">
+    Current hash values (read-write):
+    
+    ```python
+    mem[inp_values_p:] = inp.values
+    ```
+    
+    - Starts at `mem[6]`
+    - One per batch item
+    - Updated each round
+    - Size: `batch_size` words
+  </Tab>
+  <Tab title="Extra Room">
+    Scratch workspace in memory:
+    
+    ```python
+    extra_room = len(t.values) + len(inp.indices) * 2 + VLEN * 2 + 32
+    ```
+    
+    - Allocated but not initialized
+    - Can be used for temporary storage
+    - Useful for batch operations
+  </Tab>
+</Tabs>
+
+## Scratch Space
+
+Scratch space serves as the register file for the architecture:
+
+```python problem.py
+SCRATCH_SIZE = 1536  # 32-bit words per core
+
+# Each core has its own scratch space
+@dataclass
+class Core:
+    scratch: list[int]  # SCRATCH_SIZE words
+```
+
+<Note>
+Think of scratch space as a combination of:
+- **Registers** for temporary values
+- **Constant memory** for frequently-used constants
+- **Manually-managed cache** for hot data
+</Note>
+
+### Scratch Addresses as "Registers"
+
+Unlike traditional ISAs with named registers (like `r0`, `r1`), this architecture uses **numeric scratch addresses** directly in instructions:
+
+```python
+# Traditional assembly:
+# add r0, r1, r2
+
+# This architecture:
+("alu", ("+", 0, 1, 2))  # scratch[0] = scratch[1] + scratch[2]
+```
+
+### Allocating Scratch Space
+
+The `KernelBuilder` manages scratch allocation:
+
+```python perf_takehome.py
+class KernelBuilder:
+    def alloc_scratch(self, name=None, length=1):
+        """Allocate scratch space and optionally name it for debugging"""
+        addr = self.scratch_ptr
+        if name is not None:
+            self.scratch[name] = addr
+            self.scratch_debug[addr] = (name, length)
+        self.scratch_ptr += length
+        assert self.scratch_ptr <= SCRATCH_SIZE, "Out of scratch space"
+        return addr
+```
+
+**Example usage:**
+
+```python
+# Allocate scalar variables
+tmp1 = kb.alloc_scratch("tmp1")      # Returns address, e.g., 0
+tmp2 = kb.alloc_scratch("tmp2")      # Returns 1
+
+# Allocate vector (8 consecutive words)
+vec = kb.alloc_scratch("vec", 8)    # Returns 2, occupies 2-9
+
+# Now you can use these addresses in instructions:
+kb.add("alu", ("+", tmp1, tmp1, tmp2))  # tmp1 += tmp2
+kb.add("valu", ("+", vec, vec, vec))     # vec += vec (all 8 elements)
+```
+
+### Constant Handling
+
+Constants are loaded into scratch space and reused:
+
+```python perf_takehome.py
+def scratch_const(self, val, name=None):
+    """Allocate and initialize a constant, reusing if already loaded"""
+    if val not in self.const_map:
+        addr = self.alloc_scratch(name)
+        self.add("load", ("const", addr, val))
+        self.const_map[val] = addr
+    return self.const_map[val]
+
+# Usage:
+zero = kb.scratch_const(0)   # Loads 0 into scratch once
+two = kb.scratch_const(2)    # Loads 2 into scratch once
+
+# Later uses don't reload:
+kb.add("alu", ("+", dest, src, zero))  # Reuses same address
+```
+
+## Load and Store Operations
+
+### Scalar Load/Store
+
+```python problem.py
+def load(self, core, *slot):
+    match slot:
+        case ("load", dest, addr):
+            # Load from memory address stored in scratch[addr]
+            self.scratch_write[dest] = self.mem[core.scratch[addr]]
+        
+        case ("const", dest, val):
+            # Load immediate constant
+            self.scratch_write[dest] = (val) % (2**32)
+
+def store(self, core, *slot):
+    match slot:
+        case ("store", addr, src):
+            # Store to memory address stored in scratch[addr]
+            addr = core.scratch[addr]
+            self.mem_write[addr] = core.scratch[src]
+```
+
+**Key points:**
+- Memory addresses are **indirect** (stored in scratch space)
+- All values are 32-bit unsigned integers
+- Arithmetic wraps at 2³² (4,294,967,296)
+
+### Vector Load/Store
+
+```python problem.py
+def load(self, core, *slot):
+    match slot:
+        case ("vload", dest, addr):
+            # addr is a SCALAR scratch address containing memory pointer
+            addr = core.scratch[addr]
+            for vi in range(VLEN):
+                self.scratch_write[dest + vi] = self.mem[addr + vi]
+
+def store(self, core, *slot):
+    match slot:
+        case ("vstore", addr, src):
+            addr = core.scratch[addr]
+            for vi in range(VLEN):
+                self.mem_write[addr + vi] = core.scratch[src + vi]
+```
+
+**Example:**
+
+```python
+# Load 8 contiguous values from memory
+addr = kb.alloc_scratch("addr")         # Scalar: holds memory address
+vec_data = kb.alloc_scratch("data", 8)  # Vector: holds 8 values
+
+# Set address to 100
+kb.add("load", ("const", addr, 100))
+
+# Load mem[100..107] into scratch[vec_data..vec_data+7]
+kb.add("load", ("vload", vec_data, addr))
+
+# Process the vector
+kb.add("valu", ("*", vec_data, vec_data, vec_data))  # Square all values
+
+# Store back to memory
+kb.add("store", ("vstore", addr, vec_data))
+```
+
+## Memory Access Patterns
+
+### Example: Loading Header Values
+
+The reference kernel loads configuration from memory:
+
+```python perf_takehome.py
+# Allocate scratch for header values
+init_vars = ["rounds", "n_nodes", "batch_size", "forest_height",
+             "forest_values_p", "inp_indices_p", "inp_values_p"]
+for v in init_vars:
+    kb.alloc_scratch(v, 1)
+
+# Load each header value
+for i, v in enumerate(init_vars):
+    kb.add("load", ("const", tmp1, i))                    # tmp1 = i
+    kb.add("load", ("load", kb.scratch[v], tmp1))        # scratch[v] = mem[i]
+```
+
+### Example: Accessing Array Element
+
+Compute address and load:
+
+```python perf_takehome.py
+# Load inp.values[i]
+i_const = kb.scratch_const(i)
+tmp_addr = kb.alloc_scratch("tmp_addr")
+tmp_val = kb.alloc_scratch("tmp_val")
+
+# Compute address: tmp_addr = inp_values_p + i
+kb.add("alu", ("+", tmp_addr, kb.scratch["inp_values_p"], i_const))
+
+# Load: tmp_val = mem[tmp_addr]
+kb.add("load", ("load", tmp_val, tmp_addr))
+```
+
+### Example: Indirect Indexed Load
+
+Load tree node using index:
+
+```python perf_takehome.py
+# Load t.values[idx] where idx is in scratch
+tmp_addr = kb.alloc_scratch("tmp_addr")
+tmp_node_val = kb.alloc_scratch("tmp_node_val")
+tmp_idx = kb.alloc_scratch("tmp_idx")  # Contains current index
+
+# Compute address: tmp_addr = forest_values_p + idx
+kb.add("alu", ("+", tmp_addr, kb.scratch["forest_values_p"], tmp_idx))
+
+# Load: tmp_node_val = mem[tmp_addr]
+kb.add("load", ("load", tmp_node_val, tmp_addr))
+```
+
+## Memory vs Scratch Trade-offs
+
+<Tabs>
+  <Tab title="Scratch Space">
+    **Advantages:**
+    - Fast access (no latency)
+    - Direct addressing in instructions
+    - Can use for vectors (8 consecutive addresses)
+    
+    **Disadvantages:**
+    - Limited size (1536 words)
+    - Not persistent across runs
+    - Must be carefully managed
+    
+    **Use for:**
+    - Temporary variables
+    - Loop counters
+    - Intermediate results
+    - Frequently accessed data
+  </Tab>
+  <Tab title="Main Memory">
+    **Advantages:**
+    - Large capacity
+    - Persistent input/output
+    - Can grow as needed
+    
+    **Disadvantages:**
+    - Requires explicit load/store
+    - Indirect addressing only
+    - Consumes load/store slots
+    
+    **Use for:**
+    - Input data
+    - Output results
+    - Large arrays
+    - Infrequently accessed data
+  </Tab>
+</Tabs>
+
+<Warning>
+**Critical**: Scratch space is **not** automatically saved to memory. If you need results persisted, explicitly store them to memory before the program ends.
+</Warning>
+
+## Debugging Memory State
+
+The `DebugInfo` class maps scratch addresses to names:
+
+```python problem.py
+@dataclass
+class DebugInfo:
+    scratch_map: dict[int, (str, int)]  # addr → (name, length)
+
+# Usage in Machine:
+def scratch_map(self, core):
+    res = {}
+    for addr, (name, length) in self.debug_info.scratch_map.items():
+        res[name] = core.scratch[addr : addr + length]
+    return res
+```
+
+This allows viewing scratch contents by variable name during debugging.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Instruction Set" icon="code" color="#CA8A67" href="/architecture/instruction-set">
+    Complete ISA reference with all operations
+  </Card>
+  <Card title="VLIW & SIMD" icon="microchip" color="#CA8A67" href="/architecture/vliw-simd">
+    Learn about parallel execution models
+  </Card>
+</CardGroup>
